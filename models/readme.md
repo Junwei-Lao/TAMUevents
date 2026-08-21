@@ -1,0 +1,1 @@
+This folder is a placeholder for downloading an offline model for event tagging on the cloud server. And I am planning to use qwen3 8b
