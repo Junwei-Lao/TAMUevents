@@ -50,6 +50,11 @@ DEFAULT_MAX_RETRIES = 6
 DEFAULT_BACKOFF_BASE_SECONDS = 10
 DEFAULT_BACKOFF_MAX_SECONDS = 1000
 
+# Flush progress to disk every this-many newly-kept events, so a crash or
+# interruption partway through a big run (there can be thousands of events
+# across all groups) only loses the current partial batch, not everything.
+CHECKPOINT_EVERY_N_EVENTS = 20
+
 # Events whose title contains any of these (case-insensitive) are dropped,
 # e.g. recurring "Transit" shuttle/parking notices that aren't real events.
 TITLE_BLACKLIST_KEYWORDS = ["transit"]
@@ -338,10 +343,15 @@ def fetch_all_events(
     both written to disk and returned, ready for other modules (tagging.py,
     postgre_io.py, ...) to import and use directly. Pass save_to_file=False
     to skip the disk write and just get back whatever was fetched this run.
+
+    Progress is also checkpointed to `output_path` every
+    CHECKPOINT_EVERY_N_EVENTS newly-kept events, so an interruption partway
+    through a long run doesn't lose everything fetched so far.
     """
     session = requests.Session()
     visit_status = load_visit_status(status_path)
     events: List[Event] = []
+    existing_events = load_events_from_json(output_path) if save_to_file and output_path else []
 
     feeds = discover_feed_sources(session)
     logger.info("Discovered %d calendar group feeds", len(feeds))
@@ -383,6 +393,14 @@ def fetch_all_events(
             print(f"event:{parsed}")
             group_event_count += 1
 
+            if save_to_file and output_path and len(events) % CHECKPOINT_EVERY_N_EVENTS == 0:
+                checkpoint = _merge_events(existing_events, events)
+                save_events_to_json(checkpoint, output_path)
+                logger.info(
+                    "Checkpoint: saved %d total events (%d fetched so far this run) -> %s",
+                    len(checkpoint), len(events), output_path,
+                )
+
         visit_status[feed_url] = FeedVisitStatus(
             group_title=group_title,
             feed_url=feed_url,
@@ -395,7 +413,6 @@ def fetch_all_events(
     if not save_to_file or not output_path:
         return events
 
-    existing_events = load_events_from_json(output_path)
     merged_events = _merge_events(existing_events, events)
     save_events_to_json(merged_events, output_path)
     logger.info("Wrote %d total events -> %s", len(merged_events), output_path)
@@ -414,7 +431,10 @@ def fetch_sample_events(
 
     This is a standalone sampling utility for test data, not the main
     pipeline: it always hits the live feeds directly and doesn't read or
-    update the feed_visit_status.json revisit tracking.
+    update the feed_visit_status.json revisit tracking. Progress is also
+    checkpointed to output_path every CHECKPOINT_EVERY_N_EVENTS events (in
+    case a larger limit is passed in), so an interruption doesn't lose
+    everything fetched so far.
     """
     session = requests.Session()
     events: List[Event] = []
@@ -456,6 +476,12 @@ def fetch_sample_events(
 
             events.append(parsed)
             print(f"event:{parsed}")
+
+            if len(events) % CHECKPOINT_EVERY_N_EVENTS == 0:
+                save_events_to_json(events, output_path)
+                logger.info(
+                    "Checkpoint: saved %d events so far -> %s", len(events), output_path
+                )
 
     save_events_to_json(events, output_path)
     logger.info("Wrote %d sample events to %s", len(events), output_path)
