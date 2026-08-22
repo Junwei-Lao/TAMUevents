@@ -362,21 +362,26 @@ def fetch_all_events(
         group_event_count = 0
         for entry in entries:
             time.sleep(request_delay_seconds)
+
+            # Accessing the event's detail JSON is the riskiest step here
+            # (rate limiting, transient network errors, malformed
+            # responses) - never let one bad event abort the whole feed.
             try:
                 detail = fetch_event_detail(entry["url"], session)
                 parsed = parse_event(entry, detail)
-                if not _should_keep_event(parsed):
-                    continue
-
-                events.append(parsed)
-                print(f"event:{parsed}")
-
-                group_event_count += 1
-            except (requests.RequestException, ValueError, KeyError) as exc:
+            except Exception as exc:
                 logger.warning(
                     "Failed to fetch/parse event detail for %r: %s",
                     entry.get("url"), exc,
                 )
+                continue
+
+            if not _should_keep_event(parsed):
+                continue
+
+            events.append(parsed)
+            print(f"event:{parsed}")
+            group_event_count += 1
 
         visit_status[feed_url] = FeedVisitStatus(
             group_title=group_title,
@@ -433,18 +438,24 @@ def fetch_sample_events(
                 break
 
             time.sleep(request_delay_seconds)
+
+            # Same rationale as fetch_all_events: never let one bad event's
+            # detail fetch abort the whole sampling run.
             try:
                 detail = fetch_event_detail(entry["url"], session)
                 parsed = parse_event(entry, detail)
-                if not _should_keep_event(parsed):
-                    continue
-                events.append(parsed)
-                print(f"event:{parsed}")
-            except (requests.RequestException, ValueError, KeyError) as exc:
+            except Exception as exc:
                 logger.warning(
                     "Failed to fetch/parse event detail for %r: %s",
                     entry.get("url"), exc,
                 )
+                continue
+
+            if not _should_keep_event(parsed):
+                continue
+
+            events.append(parsed)
+            print(f"event:{parsed}")
 
     save_events_to_json(events, output_path)
     logger.info("Wrote %d sample events to %s", len(events), output_path)

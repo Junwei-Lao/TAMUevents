@@ -43,7 +43,7 @@ from typing import Dict, List, Sequence, Set
 
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extras import execute_values
+from psycopg2.extras import execute_values, RealDictCursor
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -273,6 +273,67 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
         )
     conn.commit()
     logger.info("Upserted %d events into events_before_tagging / events_after_tagging", len(events))
+
+
+_JOINED_EVENT_SELECT = """
+    SELECT b.*, a.topics, a.event_type
+    FROM events_after_tagging a
+    JOIN events_before_tagging b
+        ON b.event_id = a.event_id
+        AND b.date = a.date
+        AND b.date_time = a.date_time
+"""
+
+
+def get_events_by_topics(
+    topics: Sequence[str], match_all: bool = False, conn=None
+) -> List[dict]:
+    """Return events (before+after tagging fields merged) tagged with at
+    least one of `topics` (match_all=False, the default - array "overlap",
+    `&&`) or with all of them (match_all=True - array "contains", `@>`).
+    Both operators use the GIN index on events_after_tagging.topics."""
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        operator = "@>" if match_all else "&&"
+        query = _JOINED_EVENT_SELECT + f" WHERE a.topics {operator} %s ORDER BY b.event_id"
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (list(topics),))
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def get_events_by_event_type(event_type: str, conn=None) -> List[dict]:
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        query = _JOINED_EVENT_SELECT + " WHERE a.event_type = %s ORDER BY b.event_id"
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (event_type,))
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def list_topics_in_use(conn=None) -> List[str]:
+    """Distinct topic values actually present in events_after_tagging.
+    Unlike categories/categories_audience, topics don't get a precomputed
+    pool table (their taxonomy already lives in tagging.py) - this is the
+    equivalent lookup for building a topic filter UI on demand."""
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT unnest(topics) AS topic FROM events_after_tagging ORDER BY 1"
+            )
+            return [row[0] for row in cur.fetchall()]
+    finally:
+        if owns_conn:
+            conn.close()
 
 
 def initialize_database(
