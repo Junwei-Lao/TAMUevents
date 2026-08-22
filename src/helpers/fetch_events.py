@@ -39,7 +39,17 @@ DEFAULT_REVISIT_DAYS = 3
 DEFAULT_STATUS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "feed_visit_status.json"
 )
+DEFAULT_SAMPLE_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "sample_events.json"
+)
 DEFAULT_REQUEST_DELAY_SECONDS = 0.2
+DEFAULT_MAX_RETRIES = 6
+DEFAULT_BACKOFF_BASE_SECONDS = 10
+DEFAULT_BACKOFF_MAX_SECONDS = 1000
+
+# Events whose title contains any of these (case-insensitive) are dropped,
+# e.g. recurring "Transit" shuttle/parking notices that aren't real events.
+TITLE_BLACKLIST_KEYWORDS = ["transit"]
 
 HEADERS = {"User-Agent": "tamuevent-mobile-backend/1.0 (+event scraper)"}
 
@@ -101,12 +111,60 @@ def _as_str_list(value) -> List[str]:
     return [_clean_text(str(value))]
 
 
+def _get_with_retry(
+    session: requests.Session,
+    url: str,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff_base: float = DEFAULT_BACKOFF_BASE_SECONDS,
+    backoff_max: float = DEFAULT_BACKOFF_MAX_SECONDS,
+) -> requests.Response:
+    """GET a URL, retrying with exponential backoff (2s, 4s, 8s, ...) any
+    time the server doesn't return 200 - e.g. the calendar site rate-limiting
+    us for hitting it too often - or the request fails outright. Honors a
+    Retry-After header if the server sends one. Raises once retries run out.
+    """
+    attempt = 0
+    while True:
+        try:
+            response = session.get(url, headers=HEADERS, timeout=30)
+        except requests.RequestException as exc:
+            if attempt >= max_retries:
+                raise
+            delay = min(backoff_base * (2 ** attempt), backoff_max)
+            logger.warning(
+                "Request error for %s (%s); retrying in %.0fs (attempt %d/%d)",
+                url, exc, delay, attempt + 1, max_retries,
+            )
+            time.sleep(delay)
+            attempt += 1
+            continue
+
+        if response.status_code == 200:
+            return response
+
+        if attempt >= max_retries:
+            response.raise_for_status()
+            raise requests.HTTPError(f"Non-200 status {response.status_code} for {url}")
+
+        retry_after = response.headers.get("Retry-After")
+        try:
+            delay = float(retry_after) if retry_after else min(backoff_base * (2 ** attempt), backoff_max)
+        except ValueError:
+            delay = min(backoff_base * (2 ** attempt), backoff_max)
+
+        logger.warning(
+            "Got HTTP %d for %s; retrying in %.0fs (attempt %d/%d)",
+            response.status_code, url, delay, attempt + 1, max_retries,
+        )
+        time.sleep(delay)
+        attempt += 1
+
+
 def discover_feed_sources(session: Optional[requests.Session] = None) -> List[Tuple[str, str]]:
     """Scrape the calendar feeds page and return a list of
     (group_title, json_feed_url) for every calendar group listed there."""
     session = session or requests
-    response = session.get(FEEDS_PAGE_URL, headers=HEADERS, timeout=30)
-    response.raise_for_status()
+    response = _get_with_retry(session, FEEDS_PAGE_URL)
 
     soup = BeautifulSoup(response.text, "html.parser")
     feeds: List[Tuple[str, str]] = []
@@ -170,8 +228,7 @@ def _is_due_for_revisit(
 def fetch_feed_entries(json_url: str, session: Optional[requests.Session] = None) -> List[dict]:
     """Fetch a group's JSON feed (the flat list of event summaries)."""
     session = session or requests
-    response = session.get(json_url, headers=HEADERS, timeout=30)
-    response.raise_for_status()
+    response = _get_with_retry(session, json_url)
     return response.json()
 
 
@@ -193,8 +250,7 @@ def fetch_event_detail(event_url: str, session: Optional[requests.Session] = Non
     """Fetch the event-detail JSON for a feed entry's "url"."""
     session = session or requests
     detail_url = build_event_detail_url(event_url)
-    response = session.get(detail_url, headers=HEADERS, timeout=30)
-    response.raise_for_status()
+    response = _get_with_retry(session, detail_url)
     return response.json()
 
 
@@ -215,6 +271,28 @@ def parse_event(entry: dict, detail: dict) -> Event:
         categories_audience=_as_str_list(event.get("categories_audience")),
         is_canceled=event.get("is_canceled") or "",
     )
+
+
+def _is_blacklisted_title(title: str) -> bool:
+    title_lower = (title or "").lower()
+    return any(keyword in title_lower for keyword in TITLE_BLACKLIST_KEYWORDS)
+
+
+def _should_keep_event(event: Event) -> bool:
+    """Shared quality/blacklist filter used by both fetch_all_events and
+    fetch_sample_events, so the two paths never disagree on what counts as
+    a keepable event."""
+    if _is_blacklisted_title(event.title):
+        return False
+    if not event.description and not event.location:
+        return False
+    return True
+
+
+def save_events_to_json(events: List[Event], output_path: str) -> None:
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump([asdict(event) for event in events], fh, indent=2)
 
 
 def fetch_all_events(
@@ -257,11 +335,11 @@ def fetch_all_events(
             try:
                 detail = fetch_event_detail(entry["url"], session)
                 parsed = parse_event(entry, detail)
-                if not parsed.description and not parsed.location:
+                if not _should_keep_event(parsed):
                     continue
 
                 events.append(parsed)
-                print(f"event:{parsed}")
+                #print(f"event:{parsed}")
 
                 group_event_count += 1
             except (requests.RequestException, ValueError, KeyError) as exc:
@@ -281,6 +359,59 @@ def fetch_all_events(
     return events
 
 
+def fetch_sample_events(
+    limit: int = 10,
+    output_path: str = DEFAULT_SAMPLE_PATH,
+    request_delay_seconds: float = DEFAULT_REQUEST_DELAY_SECONDS,
+) -> List[Event]:
+    """Fetch just the first `limit` events that pass the usual filters
+    (blacklist, must have a description or location), pulled from feed
+    groups in discovery order, and dump them to a JSON file for local
+    Postgres testing.
+
+    This is a standalone sampling utility for test data, not the main
+    pipeline: it always hits the live feeds directly and doesn't read or
+    update the feed_visit_status.json revisit tracking.
+    """
+    session = requests.Session()
+    events: List[Event] = []
+
+    feeds = discover_feed_sources(session)
+    logger.info("Discovered %d calendar group feeds", len(feeds))
+
+    for group_title, feed_url in feeds:
+        if len(events) >= limit:
+            break
+
+        logger.info("Fetching feed for %r", group_title)
+        try:
+            entries = fetch_feed_entries(feed_url, session)
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("Failed to fetch feed %r (%s): %s", group_title, feed_url, exc)
+            continue
+
+        for entry in entries:
+            if len(events) >= limit:
+                break
+
+            time.sleep(request_delay_seconds)
+            try:
+                detail = fetch_event_detail(entry["url"], session)
+                parsed = parse_event(entry, detail)
+                if not _should_keep_event(parsed):
+                    continue
+                events.append(parsed)
+                print(f"event:{parsed}")
+            except (requests.RequestException, ValueError, KeyError) as exc:
+                logger.warning(
+                    "Failed to fetch/parse event detail for %r: %s",
+                    entry.get("url"), exc,
+                )
+
+    save_events_to_json(events, output_path)
+    logger.info("Wrote %d sample events to %s", len(events), output_path)
+    return events
+
+
 if __name__ == "__main__":
-    all_events = fetch_all_events(force=True)
-    logger.info("Fetched %d events total", len(all_events))
+    fetch_sample_events()

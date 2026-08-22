@@ -20,6 +20,8 @@ class Event:
     categories: List[str] = field(default_factory=list)
     categories_audience: List[str] = field(default_factory=list)
     is_canceled: str = ""  # "" (or absent) means not canceled
+    topics: List[str] = field(default_factory=list)  # filled in by tagging.py
+    event_type: str = ""  # filled in by tagging.py
 
 
 @dataclass
