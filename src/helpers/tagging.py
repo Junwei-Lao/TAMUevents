@@ -181,7 +181,7 @@ def _format_taxonomy(taxonomy: Dict[str, List[str]]) -> str:
 
 def _build_system_prompt() -> str:
     return (
-        "You are a classifier for Texas A&M University calendar events.\n\n"
+        "You are an expert classifier for Texas A&M University calendar events.\n\n"
         "Given an event's title, description, location, date, and source category, assign:\n"
         '1. "topics": 1-3 labels from the TOPIC taxonomy below. Use more than one only if '
         "the event is genuinely interdisciplinary; prefer a single best-fitting topic.\n"
