@@ -213,13 +213,31 @@ def load_visit_status(status_path: str = DEFAULT_STATUS_PATH) -> Dict[str, FeedV
     return {feed_url: FeedVisitStatus(**data) for feed_url, data in raw.items()}
 
 
+def _write_json(path: str, data) -> None:
+    """Write JSON to path, creating parent directories as needed. Raises a
+    clearer error than a bare PermissionError traceback if the directory or
+    an existing file there isn't writable by the current user - e.g. the
+    data/ folder was created by a different user (root via sudo, a
+    different deploy) than the one running this script now."""
+    directory = os.path.dirname(path) or "."
+    try:
+        os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+    except PermissionError as exc:
+        raise PermissionError(
+            f"No permission to write {path!r} ({exc}). This usually means {directory!r} "
+            "(or a file already in it) is owned by a different user - check with "
+            f"`ls -la {directory}` and `id`, then either `chown` it to the user "
+            "running this script or rerun with that same user/permissions."
+        ) from exc
+
+
 def save_visit_status(
     statuses: Dict[str, FeedVisitStatus], status_path: str = DEFAULT_STATUS_PATH
 ) -> None:
-    os.makedirs(os.path.dirname(status_path), exist_ok=True)
     serializable = {feed_url: asdict(status) for feed_url, status in statuses.items()}
-    with open(status_path, "w", encoding="utf-8") as fh:
-        json.dump(serializable, fh, indent=2)
+    _write_json(status_path, serializable)
 
 
 def _is_due_for_revisit(
@@ -298,9 +316,7 @@ def _should_keep_event(event: Event) -> bool:
 
 
 def save_events_to_json(events: List[Event], output_path: str) -> None:
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as fh:
-        json.dump([asdict(event) for event in events], fh, indent=2)
+    _write_json(output_path, [asdict(event) for event in events])
 
 
 def load_events_from_json(path: str) -> List[Event]:
