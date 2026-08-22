@@ -42,6 +42,9 @@ DEFAULT_STATUS_PATH = os.path.join(
 DEFAULT_SAMPLE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "sample_events.json"
 )
+DEFAULT_EVENTS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "events.json"
+)
 DEFAULT_REQUEST_DELAY_SECONDS = 0.2
 DEFAULT_MAX_RETRIES = 6
 DEFAULT_BACKOFF_BASE_SECONDS = 10
@@ -295,19 +298,46 @@ def save_events_to_json(events: List[Event], output_path: str) -> None:
         json.dump([asdict(event) for event in events], fh, indent=2)
 
 
+def load_events_from_json(path: str) -> List[Event]:
+    """Load previously saved events (e.g. from fetch_all_events) back into
+    Event objects. Returns [] if the file doesn't exist yet."""
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as fh:
+        raw = json.load(fh)
+    return [Event(**item) for item in raw]
+
+
+def _merge_events(existing: List[Event], fresh: List[Event]) -> List[Event]:
+    """Combine freshly-fetched events with whatever was already saved to
+    disk, so groups skipped this run (not due for a revisit) aren't lost
+    from the on-disk snapshot. Fresh data wins wherever it overlaps."""
+    merged = {(e.event_id, e.date, e.date_time): e for e in existing}
+    merged.update({(e.event_id, e.date, e.date_time): e for e in fresh})
+    return list(merged.values())
+
+
 def fetch_all_events(
     revisit_days: float = DEFAULT_REVISIT_DAYS,
     status_path: str = DEFAULT_STATUS_PATH,
     force: bool = False,
     request_delay_seconds: float = DEFAULT_REQUEST_DELAY_SECONDS,
+    output_path: Optional[str] = DEFAULT_EVENTS_PATH,
+    save_to_file: bool = True,
 ) -> List[Event]:
     """Fetch events for every calendar group whose feed is due for a
-    revisit (or every group, if force=True), and return them as a flat
-    list of Event.
+    revisit (or every group, if force=True).
 
     Groups that were visited more recently than `revisit_days` ago are
     skipped, and the visit-status file is updated for every group that
     *was* fetched.
+
+    By default (save_to_file=True) the freshly-fetched events are merged
+    into `output_path` (data/events.json) - so groups skipped this run
+    aren't dropped from the on-disk snapshot - and the full merged list is
+    both written to disk and returned, ready for other modules (tagging.py,
+    postgre_io.py, ...) to import and use directly. Pass save_to_file=False
+    to skip the disk write and just get back whatever was fetched this run.
     """
     session = requests.Session()
     visit_status = load_visit_status(status_path)
@@ -339,7 +369,7 @@ def fetch_all_events(
                     continue
 
                 events.append(parsed)
-                #print(f"event:{parsed}")
+                print(f"event:{parsed}")
 
                 group_event_count += 1
             except (requests.RequestException, ValueError, KeyError) as exc:
@@ -356,7 +386,15 @@ def fetch_all_events(
         )
 
     save_visit_status(visit_status, status_path)
-    return events
+
+    if not save_to_file or not output_path:
+        return events
+
+    existing_events = load_events_from_json(output_path)
+    merged_events = _merge_events(existing_events, events)
+    save_events_to_json(merged_events, output_path)
+    logger.info("Wrote %d total events -> %s", len(merged_events), output_path)
+    return merged_events
 
 
 def fetch_sample_events(
@@ -414,4 +452,4 @@ def fetch_sample_events(
 
 
 if __name__ == "__main__":
-    fetch_sample_events()
+    fetch_all_events()

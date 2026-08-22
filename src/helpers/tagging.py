@@ -5,6 +5,11 @@ The taxonomy and prompt design are documented in classification.md at the
 repo root; the dicts below are the canonical copy that prompt is generated
 from (keep classification.md in sync if these change).
 
+The API key is read from the DEEPSEEK_API_KEY environment variable, which
+can either be set directly or provided via a .env file at the repo root
+(loaded automatically on import; a real environment variable always takes
+priority over .env if both are set).
+
 Pipeline:
   1. Take Event objects, e.g. the output of fetch_events.py, or loaded from
      a saved sample_events.json.
@@ -24,6 +29,7 @@ from dataclasses import asdict
 from typing import Dict, List, Optional
 
 import requests
+from dotenv import load_dotenv
 
 from schema import Event
 
@@ -31,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
 DEFAULT_SAMPLE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "sample_events.json"
 )
@@ -43,6 +50,11 @@ DEFAULT_BACKOFF_MAX_SECONDS = 60
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 60
 DEFAULT_REQUEST_DELAY_SECONDS = 0.0
 DESCRIPTION_CHAR_LIMIT = 1500
+
+# Loads DEEPSEEK_API_KEY (and anything else) from .env into os.environ, if
+# present. Existing environment variables are never overridden by this, so
+# a real deployment env var still wins over whatever's in .env.
+load_dotenv(DEFAULT_ENV_PATH)
 
 OTHER_TOPIC = "Other / Uncategorized"
 OTHER_EVENT_TYPE = "Other"

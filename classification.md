@@ -132,3 +132,6 @@ the short user prompt and the small JSON output.
 ## Required environment variable
 
 `DEEPSEEK_API_KEY` — must be set for `src/helpers/tagging.py` to run.
+Either export it directly, or put it in a `.env` file at the repo root
+(`DEEPSEEK_API_KEY=...`, no quotes needed) — `tagging.py` loads it
+automatically via `python-dotenv`. `.env` is already gitignored.
