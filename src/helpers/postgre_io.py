@@ -34,14 +34,24 @@ without a trigger, so it's not enforced) - it exists so the app can query
 already fixed in code (`tagging.py`'s TOPIC_TAXONOMY / EVENT_TYPE_TAXONOMY),
 so they're stored the same way (TEXT[] / TEXT) without a mirrored lookup
 table.
+
+`date` is scraped free text ("December 11 - December 12, 2026", "Sep 11th,
+2026", ...) and is never reliably comparable/sortable as-is, so it's kept
+verbatim (also part of the identity key, see above) *and* parsed by
+`parse_event_date_range` into real `start_date` / `end_date DATE` columns
+for range queries. Parsing is best-effort (python-dateutil) and never
+blocks storage - an unparseable date just leaves start_date/end_date NULL.
 """
 
 import json
 import logging
 import os
-from typing import Dict, List, Sequence, Set
+import re
+from datetime import date, datetime
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import psycopg2
+from dateutil import parser as date_parser
 from psycopg2 import sql
 from psycopg2.extras import execute_values, RealDictCursor
 from dotenv import load_dotenv
@@ -97,6 +107,72 @@ def build_pool(events: Sequence[dict], field: str) -> List[str]:
     return sorted(pool)
 
 
+_ORDINAL_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
+_RANGE_SPLIT_RE = re.compile(r"\s*(?:-|–|—|\bto\b|\bthrough\b)\s*", re.IGNORECASE)
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def parse_event_date_range(raw_date: str) -> Tuple[Optional[date], Optional[date]]:
+    """Best-effort parse of the free-text `date` field scraped from TAMU's
+    calendar - e.g. "December 11 - December 12, 2026", "Sep 11th, 2026",
+    "September 11th - 12th, 2026" - into a (start_date, end_date) pair.
+
+    The two sides of a range are rarely both "complete": one side often
+    carries the year, the other the month, e.g. "September 11 - 12, 2026"
+    has no month on the right. So the left side is parsed first (using
+    whatever 4-digit year appears anywhere in the string as a fallback),
+    then the right side is parsed with the left side's result as
+    dateutil's `default` - filling in any field (month/year) the right
+    side doesn't spell out itself.
+
+    Returns (None, None) if the text can't be parsed at all. Callers
+    should treat that as "unknown", not drop the event - the raw text
+    always stays in the `date` column regardless of whether this parses.
+    """
+    if not raw_date or not raw_date.strip():
+        return None, None
+
+    cleaned = _ORDINAL_SUFFIX_RE.sub(r"\1", raw_date)
+    parts = [p for p in _RANGE_SPLIT_RE.split(cleaned) if p.strip()]
+
+    year_match = _YEAR_RE.search(cleaned)
+    anchor = datetime(int(year_match.group()), 1, 1) if year_match else datetime.now()
+
+    try:
+        start_dt = date_parser.parse(parts[0], fuzzy=True, default=anchor)
+        if len(parts) == 1:
+            return start_dt.date(), start_dt.date()
+
+        end_part = parts[-1]
+        if re.search(r"[A-Za-z]{3,}", end_part):
+            # End side spells out its own month (e.g. "December 12, 2026") -
+            # safe to let dateutil fill in whatever it's missing from
+            # start_dt.
+            end_dt = date_parser.parse(end_part, fuzzy=True, default=start_dt)
+        else:
+            # End side is day-only (e.g. "12" or "12, 2026"). dateutil can
+            # misread a lone number as a *month* when a default day is
+            # already set (it fills the day slot from the default instead
+            # of the string), so pull the day/year out directly instead of
+            # trusting its month/day assignment.
+            day_match = re.search(r"\d{1,2}", end_part)
+            end_day = int(day_match.group()) if day_match else start_dt.day
+            end_year_match = _YEAR_RE.search(end_part)
+            end_year = int(end_year_match.group()) if end_year_match else start_dt.year
+            end_dt = start_dt.replace(year=end_year, day=end_day)
+
+        # A "December 30 - January 2, 2027" style range with no year on the
+        # left: the only year mentioned belongs to January (the end), so
+        # December must be the year before it.
+        if end_dt < start_dt and not _YEAR_RE.search(parts[0]):
+            start_dt = start_dt.replace(year=start_dt.year - 1)
+
+        return start_dt.date(), end_dt.date()
+    except (ValueError, OverflowError) as exc:
+        logger.warning("Could not parse date %r (%s)", raw_date, exc)
+        return None, None
+
+
 def create_database_if_not_exists(dbname: str = DB_NAME) -> None:
     """Connects to the `postgres` maintenance database and creates `dbname`
     if it doesn't already exist. Postgres has no `CREATE DATABASE IF NOT
@@ -146,6 +222,8 @@ def create_tables(conn) -> None:
                 event_id BIGINT NOT NULL,
                 date TEXT NOT NULL DEFAULT '',
                 date_time TEXT NOT NULL DEFAULT '',
+                start_date DATE,
+                end_date DATE,
                 group_title TEXT NOT NULL,
                 url TEXT NOT NULL,
                 title TEXT NOT NULL,
@@ -172,6 +250,10 @@ def create_tables(conn) -> None:
                     ON DELETE CASCADE
             )
             """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_before_start_date "
+            "ON events_before_tagging (start_date)"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_before_categories "
@@ -213,22 +295,27 @@ def populate_pools(conn, category_pool: Sequence[str], audience_pool: Sequence[s
 
 
 def upsert_events(conn, events: Sequence[dict]) -> None:
-    before_rows = [
-        (
-            e["event_id"],
-            e.get("date") or "",
-            e.get("date_time") or "",
-            e["group_title"],
-            e["url"],
-            e["title"],
-            e.get("description"),
-            e.get("location"),
-            e.get("categories") or [],
-            e.get("categories_audience") or [],
-            e.get("is_canceled") or "",
+    before_rows = []
+    for e in events:
+        raw_date = e.get("date") or ""
+        start_date, end_date = parse_event_date_range(raw_date)
+        before_rows.append(
+            (
+                e["event_id"],
+                raw_date,
+                e.get("date_time") or "",
+                start_date,
+                end_date,
+                e["group_title"],
+                e["url"],
+                e["title"],
+                e.get("description"),
+                e.get("location"),
+                e.get("categories") or [],
+                e.get("categories_audience") or [],
+                e.get("is_canceled") or "",
+            )
         )
-        for e in events
-    ]
     after_rows = [
         (
             e["event_id"],
@@ -245,10 +332,12 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
             cur,
             """
             INSERT INTO events_before_tagging
-                (event_id, date, date_time, group_title, url, title,
+                (event_id, date, date_time, start_date, end_date, group_title, url, title,
                  description, location, categories, categories_audience, is_canceled)
             VALUES %s
             ON CONFLICT (event_id, date, date_time) DO UPDATE SET
+                start_date = EXCLUDED.start_date,
+                end_date = EXCLUDED.end_date,
                 group_title = EXCLUDED.group_title,
                 url = EXCLUDED.url,
                 title = EXCLUDED.title,
@@ -331,6 +420,33 @@ def list_topics_in_use(conn=None) -> List[str]:
                 "SELECT DISTINCT unnest(topics) AS topic FROM events_after_tagging ORDER BY 1"
             )
             return [row[0] for row in cur.fetchall()]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def get_events_in_date_range(
+    range_start: date, range_end: date, conn=None
+) -> List[dict]:
+    """Return events (before+after tagging fields merged) whose
+    [start_date, end_date] interval overlaps [range_start, range_end].
+    Events with unparseable dates (start_date IS NULL) are excluded, since
+    there's nothing to compare against."""
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        query = (
+            _JOINED_EVENT_SELECT
+            + """
+            WHERE b.start_date IS NOT NULL
+                AND b.start_date <= %s
+                AND COALESCE(b.end_date, b.start_date) >= %s
+            ORDER BY b.start_date
+            """
+        )
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (range_end, range_start))
+            return [dict(row) for row in cur.fetchall()]
     finally:
         if owns_conn:
             conn.close()
