@@ -13,6 +13,7 @@ being matched against.
 import json
 import os
 import sys
+from dataclasses import asdict
 
 import pytest
 import requests
@@ -31,7 +32,7 @@ def _load_sample_events():
     return [Event(**item) for item in raw_events]
 
 
-def _make_event(title, description="", categories=None):
+def _make_event(title, description="", categories=None, event_id=999999):
     """A minimal Event for keyword-pass tests, where the point is to
     control exactly what text is being matched - real fixture text is
     unpredictable as the taxonomy evolves (see e.g. the Third Coast
@@ -39,7 +40,7 @@ def _make_event(title, description="", categories=None):
     history" and "Anniversary" via "20th Anniversary" - not obvious just
     from reading the title)."""
     return Event(
-        event_id=999999,
+        event_id=event_id,
         group_title="Test Group",
         url="https://example.com/test",
         date="January 1, 2099",
@@ -521,3 +522,72 @@ def test_tag_sample_events_checkpoints_to_output_path(monkeypatch, tmp_path):
     assert output_path.exists()
     written = json.loads(output_path.read_text(encoding="utf-8"))
     assert len(written) == 10  # full sample_events.json, duplicates included
+
+
+# --- Loading from data/events.json (the real, full scrape) -------------
+
+
+def test_tag_events_defaults_to_loading_data_events_json(monkeypatch, tmp_path):
+    events_path = tmp_path / "events.json"
+    events_path.write_text(
+        json.dumps([asdict(_make_event(title="Loaded From Disk"))]), encoding="utf-8"
+    )
+    monkeypatch.setattr(tagging, "DEFAULT_EVENTS_PATH", str(events_path))
+    monkeypatch.setattr(
+        tagging, "_post_with_retry",
+        lambda *a, **k: _fake_response(["General Interest"], "Other"),
+    )
+
+    tagged = tagging.tag_events(api_key=FAKE_API_KEY)  # no events= argument
+
+    assert [event.title for event in tagged] == ["Loaded From Disk"]
+    assert tagged[0].event_type == "Other"
+
+
+def test_tag_events_explicit_events_list_skips_data_events_json(monkeypatch, tmp_path):
+    # DEFAULT_EVENTS_PATH points somewhere that doesn't even exist - if
+    # tag_events tried to load it despite `events` being given explicitly,
+    # this would raise FileNotFoundError and fail the test.
+    monkeypatch.setattr(tagging, "DEFAULT_EVENTS_PATH", str(tmp_path / "does_not_exist.json"))
+    monkeypatch.setattr(
+        tagging, "_post_with_retry",
+        lambda *a, **k: _fake_response(["General Interest"], "Other"),
+    )
+
+    events = [_make_event(title="Passed In Directly")]
+    tagged = tagging.tag_events(events, api_key=FAKE_API_KEY)
+
+    assert tagged is events
+    assert tagged[0].event_type == "Other"
+
+
+def test_tag_all_events_loads_from_events_json_and_writes_tagged_output(monkeypatch, tmp_path):
+    input_path = tmp_path / "events.json"
+    output_path = tmp_path / "events_tagged.json"
+    raw_events = [
+        asdict(_make_event(title="Event One", event_id=1)),
+        asdict(_make_event(title="Event Two", event_id=2)),
+    ]
+    input_path.write_text(json.dumps(raw_events), encoding="utf-8")
+
+    monkeypatch.setattr(
+        tagging, "_post_with_retry",
+        lambda *a, **k: _fake_response(["General Interest"], "Other"),
+    )
+
+    tagged = tagging.tag_all_events(
+        input_path=str(input_path), output_path=str(output_path), api_key=FAKE_API_KEY
+    )
+
+    assert [event.title for event in tagged] == ["Event One", "Event Two"]
+    assert all(event.event_type == "Other" for event in tagged)
+
+    assert output_path.exists()
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert [event["title"] for event in written] == ["Event One", "Event Two"]
+    assert all(event["event_type"] == "Other" for event in written)
+
+
+def test_tag_all_events_defaults_point_at_events_json_and_events_tagged_json():
+    assert tagging.DEFAULT_EVENTS_PATH.endswith(os.path.join("data", "events.json"))
+    assert tagging.DEFAULT_TAGGED_EVENTS_PATH.endswith(os.path.join("data", "events_tagged.json"))

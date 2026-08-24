@@ -14,8 +14,12 @@ can either be set directly or provided via a .env file at the repo root
 priority over .env if both are set).
 
 Pipeline:
-  1. Load all Event objects, from a saved sample_events.json or (once
-     postgre_io.py exists) the database.
+  1. Load all Event objects - by default from data/events.json
+     (fetch_events.fetch_all_events's output; use tag_all_events() /
+     tag_events() with no `events` argument), or from a saved
+     sample_events.json (tag_sample_events(), for local testing against
+     the small fixture), or (once postgre_io.py grows a read function for
+     events_before_tagging) the database.
   2. Group them by event_id and tag only one representative per id -
      scraped feeds sometimes list the same event more than once (see the
      duplicate event_id 372167 entries in data/sample_events.json), and
@@ -77,6 +81,15 @@ DEFAULT_SAMPLE_PATH = os.path.join(
 )
 DEFAULT_TAGGED_SAMPLE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "sample_events_tagged.json"
+)
+# fetch_events.fetch_all_events's output (the real, full scrape) and the
+# tagged file postgre_io.initialize_database() expects as input - see
+# tag_all_events().
+DEFAULT_EVENTS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "events.json"
+)
+DEFAULT_TAGGED_EVENTS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "events_tagged.json"
 )
 DEFAULT_MAX_RETRIES = 4
 DEFAULT_BACKOFF_BASE_SECONDS = 5
@@ -409,7 +422,7 @@ def _write_events_json(events: List[Event], path: str) -> None:
 
 
 def tag_events(
-    events: List[Event],
+    events: Optional[List[Event]] = None,
     api_key: Optional[str] = None,
     request_delay_seconds: float = DEFAULT_REQUEST_DELAY_SECONDS,
     checkpoint_path: Optional[str] = None,
@@ -417,6 +430,12 @@ def tag_events(
 ) -> List[Event]:
     """Classify a list of Events in place (e.g. the output of
     fetch_events.fetch_all_events) and return the same list.
+
+    If `events` is omitted, it's loaded from data/events.json (the real,
+    full scrape - fetch_events.fetch_all_events's output) via
+    load_events_from_json(DEFAULT_EVENTS_PATH). Pass a list explicitly
+    (e.g. tag_sample_events() does, for the small test fixture) to tag
+    something else.
 
     Events sharing the same event_id are only sent to the API once - the
     first occurrence is tagged, and the resulting topics/event_type are
@@ -433,6 +452,10 @@ def tag_events(
     """
     if checkpoint_path is not None and checkpoint_every < 1:
         raise ValueError("checkpoint_every must be >= 1")
+
+    if events is None:
+        events = load_events_from_json(DEFAULT_EVENTS_PATH)
+        logger.info("Loaded %d event(s) from %s", len(events), DEFAULT_EVENTS_PATH)
 
     api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
@@ -502,6 +525,35 @@ def tag_sample_events(
     return events
 
 
+def tag_all_events(
+    input_path: str = DEFAULT_EVENTS_PATH,
+    output_path: str = DEFAULT_TAGGED_EVENTS_PATH,
+    api_key: Optional[str] = None,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
+) -> List[Event]:
+    """Load events from data/events.json (fetch_events.fetch_all_events's
+    output - the real, full scrape, not the small test fixture), tag them
+    (deduplicated by event_id, checkpointed to output_path every
+    `checkpoint_every` tagged events), and write the tagged events to
+    output_path (data/events_tagged.json) - the file
+    postgre_io.initialize_database() expects as input. This is the
+    production tagging entry point; tag_sample_events() is the equivalent
+    for local testing against the small sample fixture.
+    """
+    events = load_events_from_json(input_path)
+    logger.info("Loaded %d event(s) from %s", len(events), input_path)
+
+    tag_events(
+        events,
+        api_key=api_key,
+        checkpoint_path=output_path,
+        checkpoint_every=checkpoint_every,
+    )
+    logger.info("Tagged %d events -> %s", len(events), output_path)
+
+    return events
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    tag_events()
+    tag_all_events()
