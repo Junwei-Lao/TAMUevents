@@ -83,7 +83,7 @@ _TOPIC_COLUMNS: List[str] = list(TOPIC_CATEGORY_COLUMNS.values())
 
 DEFAULT_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
 DEFAULT_TAGGED_EVENTS_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "data", "events_tagged.json"
+    os.path.dirname(__file__), "..", "..", "data", "sample_events_tagged.json"
 )
 DEFAULT_CATEGORY_POOL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "category_pool.json"
@@ -822,4 +822,4 @@ def initialize_database(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    backfill_audiences()
+    print("No action yet")

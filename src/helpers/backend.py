@@ -110,3 +110,9 @@ def search_events_endpoint(payload: SearchRequest) -> SearchResponse:
         logger.exception("search_events failed for request %s", db_request)
         raise HTTPException(status_code=500, detail="Event search failed")
     return SearchResponse(events=rows)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=9191)

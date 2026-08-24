@@ -100,7 +100,8 @@
     "is_canceled": "",
     "topics": {
       "Sports & Recreation": [
-        "Athletics"
+        "Athletics",
+        "Sport Competitions / Tournaments"
       ]
     },
     "event_type": "Sports / Recreation"
@@ -163,7 +164,8 @@
     "is_canceled": "",
     "topics": {
       "Sports & Recreation": [
-        "Athletics"
+        "Athletics",
+        "Sport Competitions / Tournaments"
       ]
     },
     "event_type": "Sports / Recreation"
