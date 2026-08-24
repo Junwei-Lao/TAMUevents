@@ -226,7 +226,19 @@ def create_database_if_not_exists(dbname: str = DB_NAME) -> None:
                 # sql.Identifier quotes the name so its case is preserved
                 # exactly as given - CREATE DATABASE would otherwise fold
                 # an unquoted mixed-case name to lowercase.
-                cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
+                try:
+                    cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
+                except psycopg2.errors.InsufficientPrivilege as exc:
+                    conn.rollback()
+                    user = _get_connection_params(dbname)["user"]
+                    raise RuntimeError(
+                        f"The '{user}' role can't create databases (no CREATEDB privilege) "
+                        "- normal for a locked-down deployment role. Create it once as a "
+                        "superuser instead:\n"
+                        f'  sudo -u postgres psql -c \'CREATE DATABASE "{dbname}" OWNER {user};\'\n'
+                        "then rerun this - create_database_if_not_exists will see it "
+                        "already exists and skip straight past this step."
+                    ) from exc
                 logger.info("Created database %r", dbname)
             else:
                 logger.info("Database %r already exists", dbname)
