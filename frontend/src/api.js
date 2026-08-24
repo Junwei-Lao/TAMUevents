@@ -1,25 +1,26 @@
-// API contract with the (future) FastAPI backend.
+// API contract with the (future) FastAPI backend - see
+// docs/front_back_contract.md for the authoritative version.
 //
 // POST {API_BASE_URL}/events/search
 // Request body:
 //   {
-//     "start_date": "YYYY-MM-DD",       // required
-//     "end_date": "YYYY-MM-DD",         // required
-//     "topics": ["<label>", ...],       // optional, omitted = no filter
-//     "event_type": "<label>",          // optional, omitted = no filter
-//     "categories": ["<label>", ...],   // optional, omitted = no filter
-//     "categories_audience": ["<label>", ...] // optional, omitted = no filter
+//     "start_date": "YYYY-MM-DD",
+//     "end_date": "YYYY-MM-DD",
+//     "topic_taxomony": { "<parent category>": ["<leaf>", ...], ... },
+//     "event_type": { "<parent category>": ["<leaf>", ...], ... },
+//     "categories": ["<value>", ...],
+//     "categories_audience": ["<value>", ...]
 //   }
+// All four filter fields are always present - "All" (no explicit picks) is
+// sent as the complete taxonomy/pool for that field rather than an omitted
+// key, since the contract doesn't model an optional/absent field. See
+// App.jsx's buildRequestBody.
+//
 // Response body:
 //   { "events": [ <Event>, ... ] }
 // where <Event> is the JSON form of src/helpers/schema.py's Event dataclass,
 // plus the `start_date` / `end_date` columns postgre_io.py stores alongside
 // it (used here for day-by-day grouping).
-//
-// The backend is expected to implement this on top of
-// postgre_io.get_events_in_date_range(start_date, end_date), narrowed
-// further by array-overlap (topics/categories/categories_audience) and
-// equality (event_type) filters when those fields are present.
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 

@@ -20,18 +20,29 @@ Pipeline:
      scraped feeds sometimes list the same event more than once (see the
      duplicate event_id 372167 entries in data/sample_events.json), and
      there's no reason to pay for the same classification twice.
-  3. Build a per-event prompt from its title/description/location/date/
-     source categories.
-  4. Call DeepSeek's chat completion API (JSON output mode) and validate
-     the labels it returns against the closed taxonomy, falling back to
-     "Other" on anything invalid or on a request failure.
-  5. Write topics/event_type back onto the Event, and copy the same
+  3. Tag each representative event with two independent passes, then join
+     their results rather than trusting the AI call alone:
+       a. A keyword pass: match taxonomy leaf phrases (schema.py's
+          TOPIC_KEYWORDS / EVENT_TYPE_KEYWORDS, derived straight from the
+          taxonomy - see schema.py's docstring) directly against the
+          event's own title/description/categories. Deterministic and
+          free - it never fails and needs no network call.
+       b. The DeepSeek AI pass: build a per-event prompt, call the chat
+          completion API (JSON output mode), and validate the labels it
+          returns against the closed taxonomy.
+     topics is the union of both passes' leaves (regrouped by category).
+     event_type prefers the AI's validated pick but falls back to the
+     keyword pass's guess if the AI call fails or doesn't return a
+     recognized leaf. Only falls back to "Other" if neither pass found
+     anything.
+  4. Write topics/event_type back onto the Event, and copy the same
      result onto every other Event sharing that event_id.
 """
 
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict
 from typing import Dict, List, Optional
@@ -40,10 +51,12 @@ import requests
 from dotenv import load_dotenv
 
 from schema import (
+    EVENT_TYPE_KEYWORDS,
     EVENT_TYPE_LEAF_TO_CATEGORY,
     EVENT_TYPE_TAXONOMY,
     OTHER_EVENT_TYPE,
     OTHER_TOPIC,
+    TOPIC_KEYWORDS,
     TOPIC_LEAF_TO_CATEGORY,
     TOPIC_TAXONOMY,
     Event,
@@ -66,6 +79,12 @@ DEFAULT_BACKOFF_MAX_SECONDS = 60
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 60
 DEFAULT_REQUEST_DELAY_SECONDS = 0.0
 DESCRIPTION_CHAR_LIMIT = 1500
+# Cap on the final, merged (keyword + AI) topics list. Each pass is
+# already bounded on its own (AI validates to at most 3; keyword matches
+# are limited by how many taxonomy phrases actually appear in the text),
+# but this is a sanity ceiling against a description that happens to hit a
+# lot of taxonomy phrases at once.
+MAX_MERGED_TOPICS = 5
 
 # Loads DEEPSEEK_API_KEY (and anything else) from .env into os.environ, if
 # present. Existing environment variables are never overridden by this, so
@@ -88,7 +107,7 @@ def _build_system_prompt() -> str:
         '2. "event_type": exactly 1 label from the EVENT_TYPE taxonomy below - the single '
         "best-fitting type.\n\n"
         "Only output labels copied exactly (spelling, punctuation, capitalization) from the "
-        f'taxonomies below. Never invent a label. '
+        f'taxonomies below. Never invent a label. If nothing fits well, use "{OTHER_TOPIC}" '
         f'for topics or "{OTHER_EVENT_TYPE}" for event_type.\n\n'
         "TOPIC taxonomy (category: leaf labels):\n"
         f"{_format_taxonomy(TOPIC_TAXONOMY)}\n\n"
@@ -104,6 +123,62 @@ SYSTEM_PROMPT = _build_system_prompt()
 _TOPIC_LEAVES = {
     leaf.lower(): leaf for leaves in TOPIC_TAXONOMY.values() for leaf in leaves
 }
+
+
+def _compile_phrase(phrase: str) -> "re.Pattern[str]":
+    return re.compile(r"\b" + re.escape(phrase) + r"\b", re.IGNORECASE)
+
+
+# {leaf: [compiled phrase pattern, ...]}, precompiled once from schema.py's
+# TOPIC_KEYWORDS/EVENT_TYPE_KEYWORDS (which are themselves derived from the
+# taxonomy - see schema.py's docstring). Catch-all leaves have no phrases,
+# so they're never present as keys with any patterns to match.
+_TOPIC_KEYWORD_PATTERNS: Dict[str, List["re.Pattern[str]"]] = {
+    leaf: [_compile_phrase(phrase) for phrase in phrases]
+    for leaf, phrases in TOPIC_KEYWORDS.items()
+    if phrases
+}
+_EVENT_TYPE_KEYWORD_PATTERNS: Dict[str, List["re.Pattern[str]"]] = {
+    leaf: [_compile_phrase(phrase) for phrase in phrases]
+    for leaf, phrases in EVENT_TYPE_KEYWORDS.items()
+    if phrases
+}
+
+
+def _keyword_search_text(event: Event) -> str:
+    return " ".join([event.title or "", event.description or "", " ".join(event.categories)])
+
+
+def _keyword_match_topics(event: Event) -> List[str]:
+    """Match taxonomy leaf phrases directly against the event's own text.
+    Deterministic and free - this never fails, unlike the AI call, so it's
+    the first pass run and the one event_type falls back to below."""
+    text = _keyword_search_text(event)
+    return [
+        leaf
+        for leaf, patterns in _TOPIC_KEYWORD_PATTERNS.items()
+        if any(pattern.search(text) for pattern in patterns)
+    ]
+
+
+def _keyword_match_event_type(event: Event) -> Optional[str]:
+    """Best-effort event_type leaf guess from keyword matches. Title
+    matches are checked first and preferred over description/category-only
+    matches; ties are broken by taxonomy declaration order in schema.py.
+    Returns a leaf (or None if nothing matched) - the caller collapses it
+    to a category the same way the AI's pick is, via _validate_event_type.
+    """
+    title = event.title or ""
+    for leaf, patterns in _EVENT_TYPE_KEYWORD_PATTERNS.items():
+        if any(pattern.search(title) for pattern in patterns):
+            return leaf
+
+    text = _keyword_search_text(event)
+    for leaf, patterns in _EVENT_TYPE_KEYWORD_PATTERNS.items():
+        if any(pattern.search(text) for pattern in patterns):
+            return leaf
+
+    return None
 
 
 def _build_user_prompt(event: Event) -> str:
@@ -204,12 +279,31 @@ def _group_topics_by_category(leaves: List[str]) -> Dict[str, List[str]]:
     return grouped
 
 
-def _validate_event_type(raw) -> str:
+def _merge_topic_leaves(keyword_leaves: List[str], ai_leaves: List[str]) -> List[str]:
+    """Union the keyword pass's matches with the AI pass's validated picks,
+    deduping while preserving order (keyword hits first, since they're
+    grounded directly in the event's own text). The AI's own OTHER_TOPIC
+    placeholder means "the AI found nothing", not a real topic, so it's
+    dropped from the merge rather than unioned in - it should never
+    survive alongside a genuine match from either pass. Falls back to
+    OTHER_TOPIC only if neither pass found anything; otherwise capped at
+    MAX_MERGED_TOPICS."""
+    ai_leaves = [leaf for leaf in ai_leaves if leaf != OTHER_TOPIC]
+    merged = list(dict.fromkeys(keyword_leaves + ai_leaves))
+    return merged[:MAX_MERGED_TOPICS] if merged else [OTHER_TOPIC]
+
+
+def _validate_event_type(raw, fallback_leaf: Optional[str] = None) -> str:
     """Validate the model's event_type pick against the leaf taxonomy, then
     collapse it to its parent category - we only store the primary class
-    (e.g. "Lecture" -> "Academic / Research"), not the specific leaf."""
-    if isinstance(raw, str) and raw.strip().lower() in EVENT_TYPE_LEAF_TO_CATEGORY:
-        return EVENT_TYPE_LEAF_TO_CATEGORY[raw.strip().lower()]
+    (e.g. "Lecture" -> "Academic / Research"), not the specific leaf. If
+    the model's pick doesn't validate (missing, malformed, or the AI call
+    failed outright), falls back to the keyword pass's leaf guess instead
+    of going straight to "Other" - so a single bad/uncertain AI response
+    doesn't throw away a solid keyword-only signal."""
+    for candidate in (raw, fallback_leaf):
+        if isinstance(candidate, str) and candidate.strip().lower() in EVENT_TYPE_LEAF_TO_CATEGORY:
+            return EVENT_TYPE_LEAF_TO_CATEGORY[candidate.strip().lower()]
     return OTHER_EVENT_TYPE
 
 
@@ -219,27 +313,41 @@ def tag_event(
     session: Optional[requests.Session] = None,
 ) -> Event:
     """Classify a single Event in place, setting event.topics and
-    event.event_type. Falls back to the "Other" labels on any request or
-    parsing failure rather than raising, so one bad event never blocks a
-    batch."""
+    event.event_type.
+
+    Runs a keyword pass and the DeepSeek AI pass, then joins their results
+    rather than trusting the AI call alone (see this module's docstring).
+    The keyword pass runs first and unconditionally - it's free and can't
+    fail - so even a total AI request failure still leaves the event with
+    whatever the keyword pass found, instead of a blind "Other".
+    """
+    keyword_topic_leaves = _keyword_match_topics(event)
+    keyword_event_type_leaf = _keyword_match_event_type(event)
+
     session = session or requests.Session()
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": _build_user_prompt(event)},
     ]
 
+    ai_topic_leaves: List[str] = []
+    ai_event_type_raw: Optional[str] = None
     try:
         data = _post_with_retry(session, api_key, messages)
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
     except (requests.RequestException, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to tag event %r (%s); falling back to Other", event.title, exc)
-        event.topics = _group_topics_by_category([OTHER_TOPIC])
-        event.event_type = OTHER_EVENT_TYPE
-        return event
+        logger.warning(
+            "DeepSeek tagging failed for event %r (%s); falling back to the keyword pass",
+            event.title, exc,
+        )
+    else:
+        ai_topic_leaves = _validate_topics(parsed.get("topics"))
+        ai_event_type_raw = parsed.get("event_type")
 
-    event.topics = _group_topics_by_category(_validate_topics(parsed.get("topics")))
-    event.event_type = _validate_event_type(parsed.get("event_type"))
+    merged_leaves = _merge_topic_leaves(keyword_topic_leaves, ai_topic_leaves)
+    event.topics = _group_topics_by_category(merged_leaves)
+    event.event_type = _validate_event_type(ai_event_type_raw, fallback_leaf=keyword_event_type_leaf)
     return event
 
 

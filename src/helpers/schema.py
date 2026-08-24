@@ -15,6 +15,16 @@ of leaves, since that's the shape the database import wants (see below).
 `tagging.py` is the one that groups the model's flat leaf picks into this
 shape (via `TOPIC_LEAF_TO_CATEGORY`); the prompt itself is unaffected.
 
+Keyword pass
+------------
+Tagging doesn't rely on the AI call alone. `TOPIC_KEYWORDS` /
+`EVENT_TYPE_KEYWORDS` (below) derive matchable phrases straight from each
+taxonomy leaf's own label - no separate keyword list to author or drift out
+of sync - and `tagging.py` matches those phrases against an event's own
+text *before* calling the AI, then joins both results. Catch-all leaves
+("Other", "Unknown", "Other STEM", ...) get no phrases, since they exist
+for the no-match case and shouldn't themselves be keyword-matched.
+
 postgre_io.py doesn't store `topics` as one column per leaf (100+ leaves
 across categories, several containing spaces/slashes/ampersands - not
 valid bare SQL identifiers - and some leaf names, e.g. "Other", repeat
@@ -310,6 +320,38 @@ EVENT_TYPE_LEAF_TO_CATEGORY: Dict[str, str] = {
     for category, leaves in EVENT_TYPE_TAXONOMY.items()
     for leaf in leaves
 }
+
+_CATCHALL_LEAVES = {"other", "unknown"}
+
+
+def _keyword_phrases_for_leaf(leaf: str) -> List[str]:
+    """Derive matchable keyword phrases for a taxonomy leaf straight from
+    its own label, rather than hand-authoring a separate keyword list that
+    would drift out of sync - e.g. "Artificial Intelligence / Machine
+    Learning" becomes ["artificial intelligence", "machine learning"].
+    Catch-all leaves ("Other", "Unknown", "Other STEM", ...) get no
+    phrases: they exist for the no-match case, so they should never
+    themselves be keyword-matched."""
+    lowered = leaf.strip().lower()
+    if lowered in _CATCHALL_LEAVES or lowered.startswith("other "):
+        return []
+    return [phrase.strip() for phrase in leaf.split(" / ") if phrase.strip()]
+
+
+def _build_keyword_index(taxonomy: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    return {
+        leaf: _keyword_phrases_for_leaf(leaf)
+        for leaves in taxonomy.values()
+        for leaf in leaves
+    }
+
+
+# {leaf label: [matchable phrase, ...]}, used by tagging.py's keyword pass
+# to pre-tag an event directly from its own text, before the AI ever sees
+# it - see this module's docstring and classification.md's "Keyword pass"
+# section.
+TOPIC_KEYWORDS: Dict[str, List[str]] = _build_keyword_index(TOPIC_TAXONOMY)
+EVENT_TYPE_KEYWORDS: Dict[str, List[str]] = _build_keyword_index(EVENT_TYPE_TAXONOMY)
 
 
 def _slugify_category(category: str) -> str:

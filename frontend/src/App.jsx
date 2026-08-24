@@ -4,7 +4,13 @@ import FilterDrawer from "./components/FilterDrawer.jsx";
 import EventList from "./components/EventList.jsx";
 import Footer from "./components/Footer.jsx";
 import { searchEvents } from "./api.js";
-import { ALL_VALUE, DEFAULT_FILTERS } from "./filterOptions.js";
+import { DEFAULT_FILTERS } from "./filterOptions.js";
+import {
+  TOPIC_TAXONOMY,
+  EVENT_TYPE_TAXONOMY,
+  CATEGORY_OPTIONS,
+  AUDIENCE_OPTIONS,
+} from "./taxonomy.js";
 
 function toIsoDate(date) {
   const year = date.getFullYear();
@@ -13,20 +19,30 @@ function toIsoDate(date) {
   return `${year}-${month}-${day}`;
 }
 
-// event_type is a single string on the Event schema; topics/categories/
-// categories_audience are arrays - so a chosen dropdown value is sent as a
-// bare string for the former and wrapped in a single-element array for the
-// latter. "All" means "don't filter on this field", so it's omitted.
+// docs/front_back_contract.md: a section with no explicit picks means "All"
+// - and "All" is sent as every value that section could ever hold, rather
+// than an omitted/empty field, since the contract always expects the field
+// present.
 function buildRequestBody(range, filters) {
-  const body = {
+  const topicTaxomony =
+    Object.keys(filters.topics).length > 0 ? filters.topics : TOPIC_TAXONOMY;
+  const eventType =
+    Object.keys(filters.event_type).length > 0 ? filters.event_type : EVENT_TYPE_TAXONOMY;
+  const categories =
+    filters.categories.length > 0 ? filters.categories : CATEGORY_OPTIONS;
+  const categoriesAudience =
+    filters.categories_audience.length > 0
+      ? filters.categories_audience
+      : AUDIENCE_OPTIONS;
+
+  return {
     start_date: toIsoDate(range.from),
     end_date: toIsoDate(range.to),
+    topic_taxomony: topicTaxomony,
+    event_type: eventType,
+    categories,
+    categories_audience: categoriesAudience,
   };
-  for (const [key, value] of Object.entries(filters)) {
-    if (value === ALL_VALUE) continue;
-    body[key] = key === "event_type" ? value : [value];
-  }
-  return body;
 }
 
 export default function App() {

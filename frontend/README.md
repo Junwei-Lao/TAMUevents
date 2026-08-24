@@ -16,6 +16,8 @@ served by a mock middleware in `vite.config.js` backed by
 
 ## API contract (for the future FastAPI backend)
 
+Authoritative version: `docs/front_back_contract.md` at the repo root.
+
 **`POST /api/events/search`**
 
 Request body:
@@ -24,17 +26,21 @@ Request body:
 {
   "start_date": "2026-09-15",
   "end_date": "2026-09-20",
-  "topics": ["Artificial Intelligence / Machine Learning"],
-  "event_type": "Seminar",
+  "topic_taxomony": {
+    "STEM & Technology": ["Artificial Intelligence / Machine Learning", "Robotics"]
+  },
+  "event_type": {
+    "Academic / Research": ["Seminar"]
+  },
   "categories": ["Academic"],
   "categories_audience": ["Students"]
 }
 ```
 
 - `start_date` / `end_date` are required, ISO 8601 `YYYY-MM-DD` strings, inclusive; `end_date` must be `>= start_date`.
-- `topics`, `event_type`, `categories`, `categories_audience` are all optional - omit a field (or leave it unselected, shown as "All" in the UI) to not filter on it.
-  `topics` / `categories` / `categories_audience` are arrays (array-overlap match against the Event's array columns, e.g. `postgre_io.get_events_by_topics`'s `&&` semantics); `event_type` is a single string (exact match), matching its type on the `Event` dataclass.
-- The frontend's filter dropdowns (Topics, Event Type, Categories, Audience) currently use placeholder options (`All`, `A`, `B`, `C`) in `src/filterOptions.js` - swap those for the real taxonomy/pool values (`tagging.py`'s `TOPIC_TAXONOMY` / `EVENT_TYPE_TAXONOMY`, and the `category_pool` / `audience_pool` tables) once the backend can serve them.
+- `topic_taxomony` / `event_type` / `categories` / `categories_audience` are always present (never omitted). Selecting "All" for a section in the UI (the default) sends the *complete* taxonomy/pool for that field rather than leaving it out, since the contract doesn't model an absent field - see `buildRequestBody` in `src/App.jsx`.
+- `topic_taxomony` / `event_type` are `{ "<parent category>": ["<leaf>", ...], ... }`, mirroring `TOPIC_TAXONOMY` / `EVENT_TYPE_TAXONOMY` in `src/helpers/schema.py` (ported to the frontend in `src/taxonomy.js` - keep the two in sync by hand). Only parents with at least one selected leaf appear as keys when the user has made an explicit pick.
+- `categories` / `categories_audience` are flat arrays - no taxonomy, since those are backend-discovered pools (`postgre_io.py`'s `category_pool` / `audience_pool` tables). The frontend currently uses placeholder options (`A`, `B`, `C`) in `src/taxonomy.js` - swap those for the real pool values once the backend can serve them.
 
 Response body:
 
@@ -55,8 +61,8 @@ Response body:
       "categories": ["Academic Calendar"],
       "categories_audience": ["Faculty", "Staff", "Students"],
       "is_canceled": "",
-      "topics": ["Other STEM"],
-      "event_type": "Ceremony"
+      "topics": { "Campus & Student Life": ["Traditions"] },
+      "event_type": "Commencement"
     }
   ]
 }
@@ -67,19 +73,20 @@ Each item is the JSON form of the `Event` dataclass in
 `src/helpers/postgre_io.py` already stores on `events_before_tagging`
 (used here for day-by-day grouping on the main page).
 
-The backend can implement this endpoint directly on top of the existing
-`get_events_in_date_range(range_start, range_end)` helper in
-`postgre_io.py` — it already returns events whose `[start_date, end_date]`
-interval overlaps the requested range, merged with their `topics` /
-`event_type` tags.
-
 ## Behavior notes
 
 - The main page starts empty and stays empty until a filter is applied; it
   does not persist events across a page refresh (no localStorage), by design.
 - The triple-line button top-left opens a slide-in panel with a calendar
-  range picker. "Clear Selection" resets the pending selection; "Apply
-  Filter" sends the request above and loads results into the main page.
+  range picker plus four filter sections (Topics, Event Type, Categories,
+  Audience). "Clear Selection" resets the date range and all filters back to
+  their defaults; "Apply Filter" sends the request above and loads results
+  into the main page.
+- Topics and Event Type are two-level: pressing a parent-category chip
+  expands/collapses its leaf chips below it; pressing a leaf toggles it as a
+  selected filter value (multi-select, across any number of parents).
+  Categories and Audience are flat chip lists (no parent level). Each
+  section starts on "All" (no explicit picks).
 - Results are grouped day-by-day (using `start_date`) with a header per day,
   each event shown as a card with title, date, and description. Clicking a
   card opens `event.url` in a new tab.

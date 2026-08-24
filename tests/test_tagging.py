@@ -1,11 +1,13 @@
 """Tests for src/helpers/tagging.py.
 
-Instead of hand-built Event stubs, these load the real fixture data at
-data/sample_events.json (the same file tag_sample_events() reads by
-default) and exercise the actual SYSTEM_PROMPT / _build_user_prompt from
-tagging.py — nothing here defines its own copy of the prompt. Only the
-network call (_post_with_retry) is mocked, so tests never hit the real
-DeepSeek API or require a real API key.
+Most tests load the real fixture data at data/sample_events.json (the same
+file tag_sample_events() reads by default) and exercise the actual
+SYSTEM_PROMPT / _build_user_prompt from tagging.py — nothing here defines
+its own copy of the prompt. Only the network call (_post_with_retry) is
+mocked, so tests never hit the real DeepSeek API or require a real API
+key. Tests specifically about the keyword pass use small hand-built Events
+instead, where the point is to control exactly what text is (or isn't)
+being matched against.
 """
 
 import json
@@ -27,6 +29,26 @@ def _load_sample_events():
     with open(tagging.DEFAULT_SAMPLE_PATH, "r", encoding="utf-8") as fh:
         raw_events = json.load(fh)
     return [Event(**item) for item in raw_events]
+
+
+def _make_event(title, description="", categories=None):
+    """A minimal Event for keyword-pass tests, where the point is to
+    control exactly what text is being matched - real fixture text is
+    unpredictable as the taxonomy evolves (see e.g. the Third Coast
+    Percussion sample event, which keyword-matches "History" via "made
+    history" and "Anniversary" via "20th Anniversary" - not obvious just
+    from reading the title)."""
+    return Event(
+        event_id=999999,
+        group_title="Test Group",
+        url="https://example.com/test",
+        date="January 1, 2099",
+        date_time="",
+        title=title,
+        description=description,
+        location=None,
+        categories=categories or [],
+    )
 
 
 def _fake_response(topics, event_type):
@@ -134,8 +156,133 @@ def test_tag_event_collapses_event_type_leaf_to_category(
     assert event.event_type == expected_category
 
 
-def test_tag_event_falls_back_on_invalid_labels(sample_events, monkeypatch):
-    event = sample_events[1]
+# --- Keyword pass -----------------------------------------------------
+
+
+def test_keyword_match_topics_finds_leaf_phrases_in_text():
+    event = _make_event(
+        title="AI Ethics Workshop",
+        description="A hands-on session about artificial intelligence and machine learning.",
+    )
+    matched = tagging._keyword_match_topics(event)
+    assert set(matched) == {"Artificial Intelligence / Machine Learning", "Ethics"}
+
+
+def test_keyword_match_topics_ignores_catchall_leaves():
+    # Catch-all leaves ("Other STEM", "Unknown", ...) have no phrases to
+    # match in the first place - see schema.py's _keyword_phrases_for_leaf.
+    assert tagging._TOPIC_KEYWORD_PATTERNS.get("Other STEM") is None
+    assert tagging._EVENT_TYPE_KEYWORD_PATTERNS.get("Other") is None
+    assert tagging._EVENT_TYPE_KEYWORD_PATTERNS.get("Unknown") is None
+
+
+def test_keyword_match_event_type_prefers_title_over_description():
+    event = _make_event(
+        title="Guest Lecture on Robotics",
+        description="Refreshments follow; a Concert takes place later that night.",
+    )
+    # "Lecture" (title) should win over "Concert" (description-only match).
+    assert tagging._keyword_match_event_type(event) == "Lecture"
+
+
+def test_keyword_match_finds_nothing_for_unrelated_text():
+    event = _make_event(
+        title="Zzyzx Quorlex Session 47",
+        description="An informal meetup about nothing in particular, just people talking.",
+    )
+    assert tagging._keyword_match_topics(event) == []
+    assert tagging._keyword_match_event_type(event) is None
+
+
+@pytest.mark.parametrize(
+    "keyword_leaves, ai_leaves, expected",
+    [
+        ([], [], [tagging.OTHER_TOPIC]),
+        (["Ethics"], [], ["Ethics"]),
+        ([], ["Ethics"], ["Ethics"]),
+        (["Ethics"], [tagging.OTHER_TOPIC], ["Ethics"]),  # AI's "Other" is dropped, not unioned
+        (["Ethics"], ["Music"], ["Ethics", "Music"]),  # keyword hits ordered first
+        (["Ethics"], ["Ethics", "Music"], ["Ethics", "Music"]),  # deduped
+    ],
+)
+def test_merge_topic_leaves(keyword_leaves, ai_leaves, expected):
+    assert tagging._merge_topic_leaves(keyword_leaves, ai_leaves) == expected
+
+
+def test_merge_topic_leaves_caps_at_max_merged_topics():
+    many_leaves = ["Ethics", "Music", "History", "Philosophy", "Literature", "English"]
+    merged = tagging._merge_topic_leaves(many_leaves, [])
+    assert len(merged) == tagging.MAX_MERGED_TOPICS
+    assert merged == many_leaves[: tagging.MAX_MERGED_TOPICS]
+
+
+def test_validate_event_type_prefers_ai_pick_over_keyword_fallback():
+    # AI's pick is valid, so it wins even though the keyword fallback differs.
+    assert tagging._validate_event_type("Lecture", fallback_leaf="Concert") == "Academic / Research"
+
+
+def test_validate_event_type_falls_back_to_keyword_leaf_when_ai_pick_invalid():
+    assert (
+        tagging._validate_event_type("not a real type", fallback_leaf="Lecture")
+        == "Academic / Research"
+    )
+    assert tagging._validate_event_type(None, fallback_leaf="Commencement") == "Ceremony / Tradition"
+
+
+def test_validate_event_type_falls_back_to_other_when_neither_pass_found_anything():
+    assert tagging._validate_event_type(None, fallback_leaf=None) == tagging.OTHER_EVENT_TYPE
+    assert tagging._validate_event_type("bogus", fallback_leaf=None) == tagging.OTHER_EVENT_TYPE
+
+
+def test_tag_event_uses_keyword_pass_when_ai_labels_are_invalid(monkeypatch):
+    # Real fixture event: title literally contains "Commencement" (an
+    # event_type leaf), so the keyword pass should rescue event_type even
+    # though the AI's own pick is garbage.
+    event = _load_sample_events()[0]
+    assert event.title == "Commencement and Commissioning"
+
+    monkeypatch.setattr(
+        tagging,
+        "_post_with_retry",
+        lambda *a, **k: _fake_response(["Not A Real Topic"], "Not A Real Type"),
+    )
+
+    tagging.tag_event(event, FAKE_API_KEY)
+
+    # No topic phrase in this event's text -> keyword pass finds nothing for
+    # topics, so that still falls all the way back to OTHER_TOPIC.
+    assert event.topics == {"General / Interdisciplinary": [tagging.OTHER_TOPIC]}
+    # ...but event_type is rescued by the keyword pass instead of "Other".
+    assert event.event_type == "Ceremony / Tradition"
+
+
+def test_tag_event_uses_keyword_pass_on_total_request_failure(monkeypatch):
+    # Real fixture event: description literally contains "made history" and
+    # "20th Anniversary" - both real taxonomy phrases - so a total AI
+    # request failure should still leave this event meaningfully tagged
+    # instead of blindly falling back to "Other" / OTHER_TOPIC.
+    event = _load_sample_events()[2]
+    assert event.title == "Third Coast Percussion: Murmurs in Time"
+
+    def raise_error(*args, **kwargs):
+        raise requests.RequestException("boom")
+
+    monkeypatch.setattr(tagging, "_post_with_retry", raise_error)
+
+    tagging.tag_event(event, FAKE_API_KEY)
+
+    assert event.topics == {
+        "Humanities": ["History"],
+        "Arts & Culture": ["Music"],
+    }
+    assert event.event_type == "Ceremony / Tradition"  # from the "Anniversary" leaf
+
+
+def test_tag_event_falls_back_on_invalid_labels_and_no_keyword_match(monkeypatch):
+    event = _make_event(
+        title="Zzyzx Quorlex Session 47",
+        description="An informal meetup about nothing in particular, just people talking.",
+    )
 
     monkeypatch.setattr(
         tagging,
@@ -149,8 +296,11 @@ def test_tag_event_falls_back_on_invalid_labels(sample_events, monkeypatch):
     assert event.event_type == tagging.OTHER_EVENT_TYPE
 
 
-def test_tag_event_falls_back_on_request_failure(sample_events, monkeypatch):
-    event = sample_events[2]
+def test_tag_event_falls_back_on_request_failure_and_no_keyword_match(monkeypatch):
+    event = _make_event(
+        title="Zzyzx Quorlex Session 47",
+        description="An informal meetup about nothing in particular, just people talking.",
+    )
 
     def raise_error(*args, **kwargs):
         raise requests.RequestException("boom")
@@ -219,12 +369,19 @@ def test_tag_sample_events_end_to_end_from_data_dir(monkeypatch, tmp_path):
     assert call_count["n"] == len({event.event_id for event in tagged})
     assert call_count["n"] < len(raw_input)
     for event in tagged:
-        assert event.topics == {"General / Interdisciplinary": ["General Interest"]}
-        assert event.event_type == "Other"
+        # The AI's pick must survive the merge for every event - some
+        # events' real text also produces keyword hits of their own (e.g.
+        # the Aggie Athletics events keyword-match "Athletics" via their
+        # "Sports & Athletics" source category), so this doesn't assert
+        # topics is *only* {"General / Interdisciplinary": [...]}.
+        assert event.topics["General / Interdisciplinary"] == ["General Interest"]
+        assert event.event_type == "Other"  # "Other" is always AI-valid, so it always wins
 
     assert output_path.exists()
     written = json.load(open(output_path, "r", encoding="utf-8"))
     assert len(written) == len(raw_input)
+    # written[0] is the Commencement event, which has no topic keyword
+    # matches of its own, so this one can assert the exact merged shape.
     assert written[0]["topics"] == {"General / Interdisciplinary": ["General Interest"]}
     assert written[0]["event_type"] == "Other"
 

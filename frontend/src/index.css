@@ -193,7 +193,7 @@ body {
   top: 0;
   left: 0;
   bottom: 0;
-  width: min(360px, 90vw);
+  width: min(420px, 92vw);
   background: white;
   box-shadow: 2px 0 20px rgba(0, 0, 0, 0.15);
   transform: translateX(-100%);
@@ -255,21 +255,96 @@ body {
   color: var(--text-muted);
 }
 
-.filter-select {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  font-size: 0.85rem;
-  color: var(--text);
+.filter-section {
+  padding-bottom: 0.9rem;
+  margin-bottom: 0.4rem;
 }
 
-.filter-select select {
-  padding: 0.5rem 0.6rem;
-  border-radius: 8px;
+.filter-section + .filter-section {
+  border-top: 1px solid var(--border);
+  padding-top: 0.9rem;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.chip-row--leaves {
+  margin: 0.4rem 0 0.6rem 0.75rem;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--border);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.32rem 0.65rem;
+  border-radius: 999px;
   border: 1px solid var(--border);
-  font-size: 0.9rem;
   background: white;
   color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  border-color: var(--maroon);
+}
+
+.chip--active {
+  background: var(--maroon);
+  border-color: var(--maroon);
+  color: white;
+}
+
+.chip--leaf {
+  font-size: 0.74rem;
+  padding: 0.28rem 0.55rem;
+}
+
+/* Split button: parent label (selects every leaf) + separate "+/-" toggle
+   (expands/collapses the leaf row below, doesn't change the selection). */
+.chip-split {
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.chip-split:hover {
+  border-color: var(--maroon);
+}
+
+.chip-split .chip--parent-label {
+  border: none;
+  border-radius: 0;
+}
+
+.chip-expand-btn {
+  padding: 0.32rem 0.55rem;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: white;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.chip-expand-btn:hover {
+  color: var(--maroon-dark);
+}
+
+.chip-expand-btn--active {
+  background: #f1e9e9;
+  color: var(--maroon-dark);
+  font-weight: 700;
 }
 
 .drawer-actions {

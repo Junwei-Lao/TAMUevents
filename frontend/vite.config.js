@@ -25,24 +25,35 @@ function mockEventsApi() {
             const {
               start_date,
               end_date,
-              topics,
+              topic_taxomony,
               event_type,
               categories,
               categories_audience,
             } = JSON.parse(body || "{}");
             const events = JSON.parse(readFileSync(dataPath, "utf-8"));
 
-            const overlaps = (fieldValues, selected) =>
-              !selected || selected.some((v) => (fieldValues || []).includes(v));
+            // topic_taxomony / event_type arrive as {parent: [leaf, ...]} -
+            // flatten to a leaf set for matching, ignoring parent grouping
+            // (a leaf label is unambiguous on its own).
+            const flattenLeaves = (dict) => Object.values(dict || {}).flat();
+
+            const overlapsArray = (fieldValues, selected) =>
+              (selected || []).some((v) => (fieldValues || []).includes(v));
+
+            const overlapsDict = (eventTopics, requestedDict) => {
+              const requestedLeaves = flattenLeaves(requestedDict);
+              const eventLeaves = flattenLeaves(eventTopics);
+              return requestedLeaves.some((leaf) => eventLeaves.includes(leaf));
+            };
 
             const filtered = events.filter((e) => {
               if (!e.start_date) return false;
               const eventEnd = e.end_date || e.start_date;
               if (!(e.start_date <= end_date && eventEnd >= start_date)) return false;
-              if (event_type && e.event_type !== event_type) return false;
-              if (!overlaps(e.topics, topics)) return false;
-              if (!overlaps(e.categories, categories)) return false;
-              if (!overlaps(e.categories_audience, categories_audience)) return false;
+              if (!overlapsDict(e.topics, topic_taxomony)) return false;
+              if (!flattenLeaves(event_type).includes(e.event_type)) return false;
+              if (!overlapsArray(e.categories, categories)) return false;
+              if (!overlapsArray(e.categories_audience, categories_audience)) return false;
               return true;
             });
 
