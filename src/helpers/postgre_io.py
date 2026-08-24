@@ -67,7 +67,12 @@ from psycopg2 import sql
 from psycopg2.extras import execute_values, RealDictCursor
 from dotenv import load_dotenv
 
-from schema import TOPIC_CATEGORY_COLUMNS, decode_topic_flags, encode_topic_flags
+from schema import (
+    TOPIC_CATEGORY_COLUMNS,
+    TOPIC_LEAF_TO_CATEGORY,
+    decode_topic_flags,
+    encode_topic_flags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +84,12 @@ _TOPIC_COLUMNS: List[str] = list(TOPIC_CATEGORY_COLUMNS.values())
 DEFAULT_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
 DEFAULT_TAGGED_EVENTS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "events_tagged.json"
+)
+DEFAULT_CATEGORY_POOL_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "category_pool.json"
+)
+DEFAULT_AUDIENCE_POOL_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "audience_pool.json"
 )
 
 DB_NAME = "TAMU_events_storage_db"
@@ -123,6 +134,17 @@ def build_pool(events: Sequence[dict], field: str) -> List[str]:
             if value:
                 pool.add(value)
     return sorted(pool)
+
+
+def save_pool_to_json(pool: Sequence[str], path: str) -> None:
+    """Write a discovered pool (e.g. build_pool's output) to a JSON file as
+    a plain sorted array - a git-diffable, DB-independent snapshot of
+    `category_pool`/`audience_pool`'s contents that doesn't require a
+    running Postgres connection to inspect."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(sorted(pool), fh, indent=2)
+    logger.info("Wrote %d pool value(s) -> %s", len(pool), path)
 
 
 _ORDINAL_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
@@ -345,7 +367,7 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
         )
     after_rows = []
     for e in events:
-        flags = encode_topic_flags(e.get("topics") or [])
+        flags = encode_topic_flags(e.get("topics") or {})
         row = [e["event_id"], e.get("date") or "", e.get("date_time") or ""]
         row.extend(flags.get(column, 0) for column in _TOPIC_COLUMNS)
         row.append(e.get("event_type") or "")
@@ -404,28 +426,43 @@ _JOINED_EVENT_SELECT = f"""
 
 def _attach_decoded_topics(rows: List[dict]) -> List[dict]:
     """Decode each row's per-category bitflag columns back into a friendly
-    `topics` list (leaving the raw bitflag columns in place too, for
-    callers that want them)."""
+    `topics` dict (`{category: [leaf, ...]}`, same shape as Event.topics),
+    leaving the raw bitflag columns in place too for callers that want
+    them."""
     for row in rows:
         row["topics"] = decode_topic_flags({col: row[col] for col in _TOPIC_COLUMNS})
     return rows
+
+
+def _leaves_to_topics_dict(leaves: Sequence[str]) -> Dict[str, List[str]]:
+    """Group a flat list of leaf topic labels into the {category: [leaf,
+    ...]} shape encode_topic_flags expects, via schema.TOPIC_LEAF_TO_CATEGORY.
+    Unrecognized leaves are skipped."""
+    grouped: Dict[str, List[str]] = {}
+    for leaf in leaves:
+        category = TOPIC_LEAF_TO_CATEGORY.get((leaf or "").strip().lower())
+        if category is None:
+            continue
+        grouped.setdefault(category, []).append(leaf)
+    return grouped
 
 
 def get_events_by_topics(
     topics: Sequence[str], match_all: bool = False, conn=None
 ) -> List[dict]:
     """Return events (before+after tagging fields merged, with a decoded
-    `topics` list attached) tagged with at least one of `topics`
-    (match_all=False, the default) or with all of them (match_all=True).
+    `topics` dict attached) tagged with at least one of `topics` - a flat
+    list of leaf labels, e.g. ["Business", "History"] - (match_all=False,
+    the default) or with all of them (match_all=True).
 
-    `topics` is translated to {category_column: bitmask} first
-    (schema.encode_topic_flags), since a topic list can span multiple
-    category columns - match_any becomes `(col & mask) <> 0` OR'd across
-    those columns, match_all becomes `(col & mask) = mask` AND'd across
-    them (bitwise "contains" within a column, since more than one leaf
-    under the same category could be requested at once).
+    `topics` is grouped by category and translated to {category_column:
+    bitmask} first (schema.encode_topic_flags), since the list can span
+    multiple category columns - match_any becomes `(col & mask) <> 0`
+    OR'd across those columns, match_all becomes `(col & mask) = mask`
+    AND'd across them (bitwise "contains" within a column, since more
+    than one leaf under the same category could be requested at once).
     """
-    flags = encode_topic_flags(list(topics))
+    flags = encode_topic_flags(_leaves_to_topics_dict(topics))
     if not flags:
         return []
 
@@ -517,11 +554,16 @@ def get_events_in_date_range(
 
 
 def initialize_database(
-    json_path: str = DEFAULT_TAGGED_EVENTS_PATH, dbname: str = DB_NAME
+    json_path: str = DEFAULT_TAGGED_EVENTS_PATH,
+    dbname: str = DB_NAME,
+    category_pool_path: str = DEFAULT_CATEGORY_POOL_PATH,
+    audience_pool_path: str = DEFAULT_AUDIENCE_POOL_PATH,
 ) -> None:
     """End-to-end setup: load data/events_tagged.json, discover the
-    categories/categories_audience pools, create the database and tables if
-    they don't exist yet, and load everything in."""
+    categories/categories_audience pools (also saving each to its own JSON
+    file in data/, alongside writing them into category_pool/audience_pool),
+    create the database and tables if they don't exist yet, and load
+    everything in."""
     events = load_tagged_events(json_path)
     logger.info("Loaded %d tagged events from %s", len(events), json_path)
 
@@ -532,6 +574,8 @@ def initialize_database(
         len(category_pool),
         len(audience_pool),
     )
+    save_pool_to_json(category_pool, category_pool_path)
+    save_pool_to_json(audience_pool, audience_pool_path)
 
     create_database_if_not_exists(dbname)
 

@@ -50,7 +50,7 @@ def test_sample_events_load_from_data_dir(sample_events):
         assert isinstance(event, Event)
         assert event.title
         # tagging fields start unset until tag_event()/tag_events() runs
-        assert event.topics == []
+        assert event.topics == {}
         assert event.event_type == ""
 
 
@@ -82,9 +82,32 @@ def test_tag_event_sends_canonical_system_prompt_and_applies_response(sample_eve
         "role": "user",
         "content": tagging._build_user_prompt(event),
     }
-    assert event.topics == ["Music"]
+    # topics is stored grouped by parent category, not as flat leaves.
+    assert event.topics == {"Arts & Culture": ["Music"]}
     # event_type is stored as the leaf's parent category, not the leaf itself.
     assert event.event_type == "Arts / Entertainment"
+
+
+def test_tag_event_groups_multiple_topics_by_category(sample_events, monkeypatch):
+    event = sample_events[0]
+    monkeypatch.setattr(
+        tagging,
+        "_post_with_retry",
+        lambda *a, **k: _fake_response(["Music", "Traditions"], "Other"),
+    )
+
+    tagging.tag_event(event, FAKE_API_KEY)
+
+    assert event.topics == {
+        "Arts & Culture": ["Music"],
+        "Campus & Student Life": ["Traditions"],
+    }
+
+
+def test_group_topics_by_category_combines_leaves_under_the_same_category():
+    # "Music" and "Photography" are both leaves under Arts & Culture.
+    grouped = tagging._group_topics_by_category(["Music", "Photography"])
+    assert grouped == {"Arts & Culture": ["Music", "Photography"]}
 
 
 @pytest.mark.parametrize(
@@ -122,7 +145,7 @@ def test_tag_event_falls_back_on_invalid_labels(sample_events, monkeypatch):
 
     tagging.tag_event(event, FAKE_API_KEY)
 
-    assert event.topics == [tagging.OTHER_TOPIC]
+    assert event.topics == {"General / Interdisciplinary": [tagging.OTHER_TOPIC]}
     assert event.event_type == tagging.OTHER_EVENT_TYPE
 
 
@@ -136,7 +159,7 @@ def test_tag_event_falls_back_on_request_failure(sample_events, monkeypatch):
 
     tagging.tag_event(event, FAKE_API_KEY)
 
-    assert event.topics == [tagging.OTHER_TOPIC]
+    assert event.topics == {"General / Interdisciplinary": [tagging.OTHER_TOPIC]}
     assert event.event_type == tagging.OTHER_EVENT_TYPE
 
 
@@ -163,12 +186,13 @@ def test_tag_events_deduplicates_by_id_and_propagates_results(sample_events, mon
     assert call_count["n"] < len(sample_events)
 
     first, second = duplicate_pair
-    assert first.topics == ["Traditions"]
+    assert first.topics == {"Campus & Student Life": ["Traditions"]}
     assert first.event_type == "Ceremony / Tradition"
     assert second.topics == first.topics
     assert second.event_type == first.event_type
-    # Copied, not aliased - mutating one event's list must not affect the other.
+    # Copied, not aliased - mutating one event's dict/lists must not affect the other.
     assert second.topics is not first.topics
+    assert second.topics["Campus & Student Life"] is not first.topics["Campus & Student Life"]
 
 
 def test_tag_sample_events_end_to_end_from_data_dir(monkeypatch, tmp_path):
@@ -195,13 +219,13 @@ def test_tag_sample_events_end_to_end_from_data_dir(monkeypatch, tmp_path):
     assert call_count["n"] == len({event.event_id for event in tagged})
     assert call_count["n"] < len(raw_input)
     for event in tagged:
-        assert event.topics == ["General Interest"]
+        assert event.topics == {"General / Interdisciplinary": ["General Interest"]}
         assert event.event_type == "Other"
 
     assert output_path.exists()
     written = json.load(open(output_path, "r", encoding="utf-8"))
     assert len(written) == len(raw_input)
-    assert written[0]["topics"] == ["General Interest"]
+    assert written[0]["topics"] == {"General / Interdisciplinary": ["General Interest"]}
     assert written[0]["event_type"] == "Other"
 
 

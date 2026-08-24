@@ -8,22 +8,29 @@ these dicts, and `postgre_io.py` stores events against them. See
 classification.md at the repo root for the human-readable copy (keep it in
 sync if these change).
 
-`topics` is multi-label (an event can be 1-3 leaves), so postgre_io.py
-doesn't store it as one column per leaf (100+ leaves across categories,
-several containing spaces/slashes/ampersands - not valid bare SQL
-identifiers - and some leaf names, e.g. "Other", repeat across categories)
-or a single TEXT[] (see the two functions below for why bitflags won).
-Instead, each *top-level category* (there are only ~11, they're stable,
-and their names are controlled by us, not scraped) becomes one 32-bit
-integer column, and each leaf within that category is a bit position -
-`encode_topic_flags`/`decode_topic_flags` convert between a list of leaf
-labels (e.g. `Event.topics`) and `{category_column_name: bitmask}`. Storing
-multiple topics under the same category is then just OR-ing their bits.
+`topics` is multi-label (an event can be 1-3 leaves) and is stored on
+`Event.topics` pre-grouped by parent category - `{category: [leaf, ...]}`,
+e.g. `{"Campus & Student Life": ["Traditions"]}` - rather than a flat list
+of leaves, since that's the shape the database import wants (see below).
+`tagging.py` is the one that groups the model's flat leaf picks into this
+shape (via `TOPIC_LEAF_TO_CATEGORY`); the prompt itself is unaffected.
+
+postgre_io.py doesn't store `topics` as one column per leaf (100+ leaves
+across categories, several containing spaces/slashes/ampersands - not
+valid bare SQL identifiers - and some leaf names, e.g. "Other", repeat
+across categories) or a single TEXT[] (see the two functions below for why
+bitflags won). Instead, each *top-level category* (there are only ~11,
+they're stable, and their names are controlled by us, not scraped) becomes
+one 32-bit integer column, and each leaf within that category is a bit
+position - `encode_topic_flags`/`decode_topic_flags` convert between the
+same `{category: [leaf, ...]}` shape as `Event.topics` and
+`{category_column_name: bitmask}`. Storing multiple topics under the same
+category is then just OR-ing their bits.
 """
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -42,7 +49,7 @@ class Event:
     categories: List[str] = field(default_factory=list)
     categories_audience: List[str] = field(default_factory=list)
     is_canceled: str = ""  # "" (or absent) means not canceled
-    topics: List[str] = field(default_factory=list)  # filled in by tagging.py
+    topics: Dict[str, List[str]] = field(default_factory=dict)  # {category: [leaf, ...]}, filled in by tagging.py
     event_type: str = ""  # filled in by tagging.py
 
 
@@ -318,12 +325,24 @@ TOPIC_CATEGORY_COLUMNS: Dict[str, str] = {
     category: _slugify_category(category) for category in TOPIC_TAXONOMY
 }
 
-# {lowercased leaf label: (category, bit index within that category's list)}
-_TOPIC_LEAF_LOCATION: Dict[str, Tuple[str, int]] = {
-    leaf.lower(): (category, index)
+# {lowercased leaf label: category}. Used by tagging.py to group the
+# model's flat leaf picks into Event.topics's {category: [leaf, ...]}
+# shape. OTHER_TOPIC isn't itself a leaf in any category (it's the
+# validation fallback value), so it's mapped in by hand onto the
+# catch-all category rather than being silently ungroupable.
+_OTHER_TOPIC_CATEGORY = "General / Interdisciplinary"
+if _OTHER_TOPIC_CATEGORY not in TOPIC_TAXONOMY:
+    raise ValueError(
+        f"{_OTHER_TOPIC_CATEGORY!r} (the catch-all category OTHER_TOPIC maps to) "
+        "is no longer in TOPIC_TAXONOMY - update _OTHER_TOPIC_CATEGORY above"
+    )
+
+TOPIC_LEAF_TO_CATEGORY: Dict[str, str] = {
+    leaf.lower(): category
     for category, leaves in TOPIC_TAXONOMY.items()
-    for index, leaf in enumerate(leaves)
+    for leaf in leaves
 }
+TOPIC_LEAF_TO_CATEGORY.setdefault(OTHER_TOPIC.lower(), _OTHER_TOPIC_CATEGORY)
 
 for _category, _leaves in TOPIC_TAXONOMY.items():
     if len(_leaves) > 32:
@@ -333,33 +352,37 @@ for _category, _leaves in TOPIC_TAXONOMY.items():
         )
 
 
-def encode_topic_flags(topics: List[str]) -> Dict[str, int]:
-    """Convert a list of leaf topic labels (e.g. Event.topics) into
-    {category_column_name: bitmask}, OR-ing together every topic that
-    falls under the same category. Unrecognized labels are skipped.
+def encode_topic_flags(topics: Dict[str, List[str]]) -> Dict[str, int]:
+    """Convert the {category: [leaf, ...]} topics shape (e.g. Event.topics)
+    into {category_column_name: bitmask}, OR-ing together every leaf under
+    the same category. Unrecognized categories/leaves are skipped.
     Categories with no matching topic are simply absent from the result -
     callers should treat a missing key as 0."""
     flags: Dict[str, int] = {}
-    for label in topics:
-        location = _TOPIC_LEAF_LOCATION.get((label or "").strip().lower())
-        if location is None:
+    for category, leaves in topics.items():
+        category_leaves = TOPIC_TAXONOMY.get(category)
+        if category_leaves is None:
             continue
-        category, bit_index = location
         column = TOPIC_CATEGORY_COLUMNS[category]
-        flags[column] = flags.get(column, 0) | (1 << bit_index)
+        for leaf in leaves:
+            try:
+                bit_index = category_leaves.index(leaf)
+            except ValueError:
+                continue
+            flags[column] = flags.get(column, 0) | (1 << bit_index)
     return flags
 
 
-def decode_topic_flags(flags: Dict[str, int]) -> List[str]:
+def decode_topic_flags(flags: Dict[str, int]) -> Dict[str, List[str]]:
     """Inverse of encode_topic_flags: given {category_column_name: bitmask}
-    (missing/zero entries are fine), return the sorted-by-category list of
-    leaf topic labels those bits represent."""
-    labels: List[str] = []
+    (missing/zero entries are fine), return {category: [leaf, ...]} - the
+    same shape as Event.topics - for every set bit."""
+    topics: Dict[str, List[str]] = {}
     for category, leaves in TOPIC_TAXONOMY.items():
         mask = flags.get(TOPIC_CATEGORY_COLUMNS[category]) or 0
         if not mask:
             continue
-        for bit_index, leaf in enumerate(leaves):
-            if mask & (1 << bit_index):
-                labels.append(leaf)
-    return labels
+        matched = [leaf for bit_index, leaf in enumerate(leaves) if mask & (1 << bit_index)]
+        if matched:
+            topics[category] = matched
+    return topics

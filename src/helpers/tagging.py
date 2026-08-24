@@ -44,6 +44,7 @@ from schema import (
     EVENT_TYPE_TAXONOMY,
     OTHER_EVENT_TYPE,
     OTHER_TOPIC,
+    TOPIC_LEAF_TO_CATEGORY,
     TOPIC_TAXONOMY,
     Event,
 )
@@ -190,6 +191,19 @@ def _validate_topics(raw) -> List[str]:
     return valid[:3] if valid else [OTHER_TOPIC]
 
 
+def _group_topics_by_category(leaves: List[str]) -> Dict[str, List[str]]:
+    """Group already-validated leaf topic labels into
+    {category: [leaf, ...]} - the shape Event.topics is stored in, since
+    it's what the database import wants (see schema.py's docstring)."""
+    grouped: Dict[str, List[str]] = {}
+    for leaf in leaves:
+        category = TOPIC_LEAF_TO_CATEGORY.get(leaf.lower())
+        if category is None:
+            continue
+        grouped.setdefault(category, []).append(leaf)
+    return grouped
+
+
 def _validate_event_type(raw) -> str:
     """Validate the model's event_type pick against the leaf taxonomy, then
     collapse it to its parent category - we only store the primary class
@@ -220,11 +234,11 @@ def tag_event(
         parsed = json.loads(content)
     except (requests.RequestException, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
         logger.warning("Failed to tag event %r (%s); falling back to Other", event.title, exc)
-        event.topics = [OTHER_TOPIC]
+        event.topics = _group_topics_by_category([OTHER_TOPIC])
         event.event_type = OTHER_EVENT_TYPE
         return event
 
-    event.topics = _validate_topics(parsed.get("topics"))
+    event.topics = _group_topics_by_category(_validate_topics(parsed.get("topics")))
     event.event_type = _validate_event_type(parsed.get("event_type"))
     return event
 
@@ -286,7 +300,9 @@ def tag_events(
         representative, duplicates = group[0], group[1:]
         tag_event(representative, api_key, session)
         for duplicate in duplicates:
-            duplicate.topics = list(representative.topics)
+            duplicate.topics = {
+                category: list(leaves) for category, leaves in representative.topics.items()
+            }
             duplicate.event_type = representative.event_type
         if request_delay_seconds:
             time.sleep(request_delay_seconds)
