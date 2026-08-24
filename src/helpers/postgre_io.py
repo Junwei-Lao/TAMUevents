@@ -505,6 +505,12 @@ def backfill_audiences(conn=None) -> int:
 
 
 _AFTER_TOPIC_COLUMNS_SELECT = ", ".join(f"a.{column}" for column in _TOPIC_COLUMNS)
+# is_canceled lives in the JOIN's ON clause (not each caller's own WHERE)
+# so every read function excludes canceled events - `b.is_canceled` is
+# TEXT NOT NULL DEFAULT '', so "not canceled" is '', never SQL NULL. Since
+# this is an INNER JOIN, an extra ON condition and a WHERE condition are
+# equivalent, so this doesn't change what any existing WHERE clause below
+# needs to say.
 _JOINED_EVENT_SELECT = f"""
     SELECT b.*, {_AFTER_TOPIC_COLUMNS_SELECT}, a.event_type
     FROM events_after_tagging a
@@ -512,6 +518,7 @@ _JOINED_EVENT_SELECT = f"""
         ON b.event_id = a.event_id
         AND b.date = a.date
         AND b.date_time = a.date_time
+        AND b.is_canceled = ''
 """
 
 
@@ -657,6 +664,101 @@ def get_events_in_date_range(
         )
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(query, (range_end, range_start))
+            rows = [dict(row) for row in cur.fetchall()]
+        return _attach_decoded_topics(rows)
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def search_events(request: Optional[dict] = None, conn=None) -> List[dict]:
+    """The main event-read entry point, implementing docs/back_db_contract.md.
+
+    `request` is a dict shaped like the contract (every key optional - an
+    absent, `None`, or empty key applies no filter for that field):
+
+        {
+            "start_date": date | None,
+            "end_date": date | None,
+            "topic_taxomony": {category_column: bitmask, ...},  # schema.encode_topic_flags's output
+            "event_type": [event_type, ...],
+            "categories": [category, ...],
+            "categories_audience": [audience, ...],
+        }
+
+    Per the contract, values *within* one field are OR'd together (e.g.
+    event_type1 OR event_type2 OR ...); the fields themselves are AND'd
+    together (topic_taxomony AND (event_type... ) AND (categories...) AND
+    (categories_audience...) AND the date range). Results are sorted by
+    ascending start_date (unparseable/NULL dates sort last, not dropped -
+    they just can't be placed in order).
+
+    `topic_taxomony` is taken as already-computed bitflags (per the
+    contract) rather than leaf labels - build it with
+    schema.encode_topic_flags (or postgre_io._leaves_to_topics_dict +
+    encode_topic_flags, if you're starting from leaf labels) before
+    calling this. Any key in it that isn't a real bitflag column is
+    dropped rather than trusted, since it would otherwise be interpolated
+    into the query as a column name.
+    """
+    request = request or {}
+    conditions: List[str] = []
+    params: List[object] = []
+
+    start_date = request.get("start_date")
+    end_date = request.get("end_date")
+    if start_date is not None or end_date is not None:
+        # Unparseable-date events have nothing to compare against, so a
+        # date-filtered search has to exclude them (a date-unfiltered
+        # search still includes them - see the ORDER BY below).
+        conditions.append("b.start_date IS NOT NULL")
+        if start_date is not None:
+            conditions.append("COALESCE(b.end_date, b.start_date) >= %s")
+            params.append(start_date)
+        if end_date is not None:
+            conditions.append("b.start_date <= %s")
+            params.append(end_date)
+
+    topic_flags = {
+        column: mask
+        for column, mask in (request.get("topic_taxomony") or {}).items()
+        if mask and column in TOPIC_CATEGORY_COLUMNS.values()
+    }
+    if topic_flags:
+        topic_conditions = [f"(a.{column} & %s) <> 0" for column in topic_flags]
+        conditions.append("(" + " OR ".join(topic_conditions) + ")")
+        params.extend(topic_flags.values())
+
+    event_types = [v for v in (request.get("event_type") or []) if v]
+    if event_types:
+        conditions.append("a.event_type = ANY(%s)")
+        params.append(event_types)
+
+    categories = [v for v in (request.get("categories") or []) if v]
+    if categories:
+        conditions.append("b.categories && %s")
+        params.append(categories)
+
+    audiences = [v for v in (request.get("categories_audience") or []) if v]
+    if audiences:
+        # An "open to everyone" event (see normalize_audience) satisfies
+        # any requested audience too.
+        wanted = list(audiences)
+        if EVERYONE_AUDIENCE not in wanted:
+            wanted.append(EVERYONE_AUDIENCE)
+        conditions.append("b.categories_audience && %s")
+        params.append(wanted)
+
+    query = _JOINED_EVENT_SELECT
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY b.start_date ASC NULLS LAST, b.event_id"
+
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
             rows = [dict(row) for row in cur.fetchall()]
         return _attach_decoded_topics(rows)
     finally:
