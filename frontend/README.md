@@ -39,7 +39,7 @@ Request body:
     "STEM & Technology": ["Artificial Intelligence / Machine Learning", "Robotics"]
   },
   "event_type": {
-    "Academic / Research": ["Seminar"]
+    "Academic / Research": []
   },
   "categories": ["Sports & Athletics"],
   "categories_audience": ["Students"]
@@ -48,8 +48,8 @@ Request body:
 
 - `start_date` / `end_date` are required, ISO 8601 `YYYY-MM-DD` strings, inclusive; `end_date` must be `>= start_date`.
 - `topic_taxomony` / `event_type` / `categories` / `categories_audience` are always present. An **empty** `{}` / `[]` means "All" (no filter on that field) - this matches `backend.py`'s `SearchRequest` defaults and `postgre_io.search_events`'s documented semantics (`docs/back_db_contract.md`: "an absent, `None`, or empty key applies no filter"). The frontend never expands "All" into an explicit full list - see `buildRequestBody` in `src/App.jsx`.
-- `topic_taxomony` / `event_type` are `{ "<parent category>": ["<leaf>", ...], ... }`, mirroring `TOPIC_TAXONOMY` / `EVENT_TYPE_TAXONOMY` in `src/helpers/schema.py` (ported to the frontend in `src/taxonomy.js` - keep the two in sync by hand). Only parents with at least one selected leaf appear as keys.
-  - `event_type` is only ever stored on an `Event` at the **parent-category** level (`tagging.py`'s `_validate_event_type` collapses the model's leaf pick to its parent), so `backend.py` only looks at `event_type`'s parent keys, not which specific leaves are selected under them - picking any one leaf has the same filtering effect as picking all of them.
+- `topic_taxomony` is `{ "<parent category>": ["<leaf>", ...], ... }`, mirroring `TOPIC_TAXONOMY` in `src/helpers/schema.py` (ported to the frontend in `src/taxonomy.js` - keep the two in sync by hand). Only parents with at least one selected leaf appear as keys.
+- `event_type` uses the same `{parent: [leaf, ...]}` shape for contract consistency, but is only ever stored on an `Event` at the **parent-category** level (`tagging.py`'s `_validate_event_type` collapses the model's leaf pick to its parent), so `backend.py` only looks at its parent keys - the leaf arrays are ignored server-side. The UI reflects this: Event Type is a flat pick of parent category names (`EVENT_TYPE_CATEGORIES` in `src/taxonomy.js`, no leaves, no expand), and `App.jsx`'s `buildRequestBody` wraps each selected name as `{name: []}` before sending.
 - `categories` / `categories_audience` are flat arrays (no taxonomy) - discovered pools mirrored from `data/category_pool.json` / `data/audience_pool.json` into `src/taxonomy.js`'s `CATEGORY_OPTIONS` / `AUDIENCE_OPTIONS`. Keep those in sync by hand if the pool files change (there's no endpoint yet to fetch them at runtime).
 
 Response body:
@@ -92,12 +92,13 @@ Each item is the JSON form of the `Event` dataclass in
   Audience). "Clear Selection" resets the date range and all filters back to
   their defaults; "Apply Filter" sends the request above and loads results
   into the main page.
-- Topics and Event Type are two-level: each parent category is a split
-  button - pressing the label selects/deselects every leaf under it in one
-  press, pressing the separate "+"/"−" only expands or collapses the leaf
-  chips below it (without changing the selection). Leaf chips toggle
-  individually. Categories and Audience are flat chip lists (no parent
-  level). Each section starts on "All" (no explicit picks - sent as `{}`/`[]`).
+- Topics is two-level: each parent category is a split button - pressing the
+  label selects/deselects every leaf under it in one press, pressing the
+  separate "+"/"−" only expands or collapses the leaf chips below it
+  (without changing the selection). Leaf chips toggle individually. Event
+  Type, Categories, and Audience are flat chip lists (no parent/leaf split -
+  event types have no useful leaf-level filter, see above). Each section
+  starts on "All" (no explicit picks - sent as `{}`/`[]`).
 - Results are grouped day-by-day (using `start_date`) with a header per day,
   each event shown as a card with title, date, and description. Clicking a
   card opens `event.url` in a new tab.

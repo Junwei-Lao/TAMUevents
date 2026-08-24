@@ -2,7 +2,7 @@ import { useState } from "react";
 import { DayPicker } from "react-day-picker";
 import TaxonomyFilterSection from "./TaxonomyFilterSection.jsx";
 import FlatFilterSection from "./FlatFilterSection.jsx";
-import { TOPIC_TAXONOMY, EVENT_TYPE_TAXONOMY, CATEGORY_OPTIONS, AUDIENCE_OPTIONS } from "../taxonomy.js";
+import { TOPIC_TAXONOMY, EVENT_TYPE_CATEGORIES, CATEGORY_OPTIONS, AUDIENCE_OPTIONS } from "../taxonomy.js";
 
 function formatRangeLabel(range) {
   if (!range?.from) return "No dates selected";
@@ -68,12 +68,10 @@ export default function FilterDrawer({
   const canApply = Boolean(range?.from && range?.to) && !isLoading;
 
   const [expandedTopics, setExpandedTopics] = useState(new Set());
-  const [expandedEventTypes, setExpandedEventTypes] = useState(new Set());
 
   const handleClear = () => {
     onClear();
     setExpandedTopics(new Set());
-    setExpandedEventTypes(new Set());
   };
 
   return (
@@ -118,27 +116,14 @@ export default function FilterDrawer({
             onSelectAll={() => onFilterChange("topics", {})}
           />
 
-          <TaxonomyFilterSection
+          <FlatFilterSection
             title="Event Type"
-            taxonomy={EVENT_TYPE_TAXONOMY}
+            options={EVENT_TYPE_CATEGORIES}
             selected={filters.event_type}
-            expandedParents={expandedEventTypes}
-            onToggleExpand={(parent) =>
-              setExpandedEventTypes((prev) => toggleInSet(prev, parent))
+            onToggle={(value) =>
+              onFilterChange("event_type", toggleFlatValue(filters.event_type, value))
             }
-            onToggleLeaf={(parent, leaf) =>
-              onFilterChange(
-                "event_type",
-                toggleTaxonomyLeaf(filters.event_type, parent, leaf)
-              )
-            }
-            onToggleParentAll={(parent, allLeaves) =>
-              onFilterChange(
-                "event_type",
-                toggleAllLeavesForParent(filters.event_type, parent, allLeaves)
-              )
-            }
-            onSelectAll={() => onFilterChange("event_type", {})}
+            onSelectAll={() => onFilterChange("event_type", [])}
           />
 
           <FlatFilterSection

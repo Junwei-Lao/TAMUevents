@@ -8,7 +8,10 @@ export const ALL_LABEL = "All";
 // absent/empty field as "no filter", so it's sent through as-is.
 export const DEFAULT_FILTERS = {
   topics: {},
-  event_type: {},
+  // event_type is only ever stored on an Event at the parent-category
+  // level (see tagging.py's _validate_event_type), so unlike topics there's
+  // no useful leaf-level filter - just a flat pick of parent categories.
+  event_type: [],
   categories: [],
   categories_audience: [],
 };

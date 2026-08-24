@@ -69,64 +69,27 @@ export const TOPIC_TAXONOMY = {
   ],
 };
 
-export const EVENT_TYPE_TAXONOMY = {
-  "Academic / Research": [
-    "Lecture", "Seminar", "Colloquium", "Research Talk", "Guest Speaker",
-    "Panel Discussion", "Research Presentation", "Research Showcase",
-  ],
-  "Conference / Large Academic Event": [
-    "Conference", "Symposium", "Summit", "Convention", "Research Conference",
-    "Academic Meeting",
-  ],
-  "Workshop / Training": [
-    "Workshop", "Hands-on Workshop", "Training", "Tutorial", "Certification",
-    "Skill Development", "Software / Technical Training", "Hackathon / Case Competition",
-  ],
-  "Career / Professional": [
-    "Career Fair", "Job Fair", "Employer Information Session", "Recruiting Event",
-    "Networking", "Resume / CV Workshop", "Interview Preparation",
-    "Professional Development", "Industry Talk", "Graduate School Preparation",
-  ],
-  "Student Organization": [
-    "Club Meeting", "Organization Meeting", "Student Group Event", "Student Leadership",
-    "Organization Recruitment", "Club Social",
-  ],
-  "Social / Community": [
-    "Social", "Mixer", "Networking Social", "Community Gathering", "Party", "Festival",
-    "Picnic", "Game Night", "Volunteer Event", "Community Service", "Fundraiser",
-    "Religious / Worship Service",
-  ],
-  "Arts / Entertainment": [
-    "Concert", "Musical Performance", "Theater Performance", "Dance Performance",
-    "Film Screening", "Art Exhibition", "Gallery Event", "Cultural Performance",
-  ],
-  "Sports / Recreation": [
-    "Sporting Event", "Intramural", "Club Sport", "Fitness Class",
-    "Recreational Activity", "Outdoor Activity", "Tournament", "Athletic Competition",
-  ],
-  "Orientation / Recruitment": [
-    "New Student Orientation", "Transfer Orientation", "Graduate Orientation",
-    "Welcome Event", "Admissions Event", "Open House", "Prospective Student Event",
-    "Recruitment Event",
-  ],
-  "Health / Wellness": [
-    "Health Screening", "Wellness Event", "Fitness Event", "Mental Health Workshop",
-    "Health Education", "Medical / Health Consultation",
-  ],
-  "Ceremony / Tradition": [
-    "Ceremony", "Commencement", "Memorial", "University Tradition", "Recognition",
-    "Award Ceremony", "Dedication", "Anniversary",
-  ],
-  "Administrative / Information": [
-    "Information Session", "Advising", "Town Hall", "Q&A", "Office Hours",
-    "Policy Meeting", "Administrative Meeting",
-  ],
-  "Exhibition / Showcase": [
-    "Research Exhibition", "Student Showcase", "Project Showcase", "Poster Session",
-    "Demonstration", "Open Lab",
-  ],
-  "Other": ["Other", "Unknown"],
-};
+// event_type is only ever stored on an Event at the parent-category level
+// (tagging.py's _validate_event_type collapses the model's leaf pick to
+// its parent), so unlike TOPIC_TAXONOMY there's no leaf-level filtering
+// power to expose in the UI - just the parent category names themselves,
+// mirroring EVENT_TYPE_TAXONOMY's keys in src/helpers/schema.py.
+export const EVENT_TYPE_CATEGORIES = [
+  "Academic / Research",
+  "Conference / Large Academic Event",
+  "Workshop / Training",
+  "Career / Professional",
+  "Student Organization",
+  "Social / Community",
+  "Arts / Entertainment",
+  "Sports / Recreation",
+  "Orientation / Recruitment",
+  "Health / Wellness",
+  "Ceremony / Tradition",
+  "Administrative / Information",
+  "Exhibition / Showcase",
+  "Other",
+];
 
 // Categories / categories_audience have no fixed taxonomy - they're
 // discovered pools, mirroring data/category_pool.json and

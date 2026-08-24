@@ -17,12 +17,20 @@ function toIsoDate(date) {
 // docs/back_db_contract.md) treat an empty dict/array as "no filter on this
 // field" - so "All" (no explicit picks) is sent as {} / [] as-is, not
 // expanded into every possible value.
+//
+// The contract's event_type field is shaped like topic_taxomony
+// ({parent: [leaf, ...]}), but backend.py only ever reads its keys - event
+// types are stored per-Event at the parent-category level only (see
+// filterOptions.js) - so the UI just picks flat parent names and this
+// wraps each one in an (unused) empty leaf array to match the shape.
 function buildRequestBody(range, filters) {
+  const eventType = Object.fromEntries(filters.event_type.map((parent) => [parent, []]));
+
   return {
     start_date: toIsoDate(range.from),
     end_date: toIsoDate(range.to),
     topic_taxomony: filters.topics,
-    event_type: filters.event_type,
+    event_type: eventType,
     categories: filters.categories,
     categories_audience: filters.categories_audience,
   };
