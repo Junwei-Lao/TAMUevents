@@ -37,12 +37,17 @@ Pipeline:
      anything.
   4. Write topics/event_type back onto the Event, and copy the same
      result onto every other Event sharing that event_id.
+  5. Every DEFAULT_CHECKPOINT_EVERY (20) tagged events, and once more at
+     the end, write the full events list to disk (atomically) if a
+     checkpoint path was given - see tag_events()'s docstring - so a long
+     run interrupted partway through doesn't lose everything tagged so far.
 """
 
 import json
 import logging
 import os
 import re
+import tempfile
 import time
 from dataclasses import asdict
 from typing import Dict, List, Optional
@@ -85,6 +90,9 @@ DESCRIPTION_CHAR_LIMIT = 1500
 # but this is a sanity ceiling against a description that happens to hit a
 # lot of taxonomy phrases at once.
 MAX_MERGED_TOPICS = 5
+# How often (in tagged events) tag_events() checkpoints progress to disk,
+# when a checkpoint_path is given - see tag_events()'s docstring.
+DEFAULT_CHECKPOINT_EVERY = 20
 
 # Loads DEEPSEEK_API_KEY (and anything else) from .env into os.environ, if
 # present. Existing environment variables are never overridden by this, so
@@ -379,10 +387,33 @@ def _group_by_event_id(events: List[Event]) -> Dict[int, List[Event]]:
     return groups
 
 
+def _write_events_json(events: List[Event], path: str) -> None:
+    """Write events to `path` as JSON, atomically: write to a temp file in
+    the same directory, then rename it over the destination. A crash or
+    interruption mid-write can never leave a truncated/corrupt file at
+    `path` - the destination is either the old content or the new content,
+    never something in between."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump([asdict(event) for event in events], fh, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def tag_events(
     events: List[Event],
     api_key: Optional[str] = None,
     request_delay_seconds: float = DEFAULT_REQUEST_DELAY_SECONDS,
+    checkpoint_path: Optional[str] = None,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
 ) -> List[Event]:
     """Classify a list of Events in place (e.g. the output of
     fetch_events.fetch_all_events) and return the same list.
@@ -390,7 +421,19 @@ def tag_events(
     Events sharing the same event_id are only sent to the API once - the
     first occurrence is tagged, and the resulting topics/event_type are
     copied onto every other event with that id.
+
+    If checkpoint_path is given, the full `events` list (including events
+    not yet tagged) is written to it as JSON after every `checkpoint_every`
+    tagged event (default 20), and once more when tagging finishes if the
+    final count wasn't already on a checkpoint boundary - so a crash or
+    interrupted run partway through a long batch doesn't lose everything
+    tagged so far. "Tagged event" here means unique event_id groups, since
+    that's what actually costs an API call and takes time; duplicates are
+    instant and don't affect the checkpoint cadence.
     """
+    if checkpoint_path is not None and checkpoint_every < 1:
+        raise ValueError("checkpoint_every must be >= 1")
+
     api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set")
@@ -404,6 +447,8 @@ def tag_events(
             duplicate_count, len(groups),
         )
 
+    tagged_count = 0
+    last_checkpoint_count = 0
     for group in groups.values():
         representative, duplicates = group[0], group[1:]
         tag_event(representative, api_key, session)
@@ -415,6 +460,22 @@ def tag_events(
         if request_delay_seconds:
             time.sleep(request_delay_seconds)
 
+        tagged_count += 1
+        if checkpoint_path and tagged_count % checkpoint_every == 0:
+            logger.info(
+                "Checkpoint: %d/%d tagged event(s) -> %s",
+                tagged_count, len(groups), checkpoint_path,
+            )
+            _write_events_json(events, checkpoint_path)
+            last_checkpoint_count = tagged_count
+
+    if checkpoint_path and tagged_count != last_checkpoint_count:
+        logger.info(
+            "Checkpoint: %d/%d tagged event(s) -> %s (final)",
+            tagged_count, len(groups), checkpoint_path,
+        )
+        _write_events_json(events, checkpoint_path)
+
     return events
 
 
@@ -422,17 +483,20 @@ def tag_sample_events(
     input_path: str = DEFAULT_SAMPLE_PATH,
     output_path: str = DEFAULT_TAGGED_SAMPLE_PATH,
     api_key: Optional[str] = None,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
 ) -> List[Event]:
     """Load events from a saved sample_events.json, tag them (deduplicated
-    by event_id), and write the tagged events to output_path. Standalone
-    utility for local testing."""
+    by event_id, checkpointed to output_path every `checkpoint_every`
+    tagged events), and return them. Standalone utility for local testing.
+    """
     events = load_events_from_json(input_path)
 
-    tag_events(events, api_key=api_key)
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as fh:
-        json.dump([asdict(event) for event in events], fh, indent=2)
+    tag_events(
+        events,
+        api_key=api_key,
+        checkpoint_path=output_path,
+        checkpoint_every=checkpoint_every,
+    )
     logger.info("Tagged %d events -> %s", len(events), output_path)
 
     return events

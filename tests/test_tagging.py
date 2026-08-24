@@ -390,3 +390,134 @@ def test_tag_events_requires_api_key(sample_events, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
         tagging.tag_events(sample_events[:1], api_key=None)
+
+
+# --- Checkpointing ------------------------------------------------------
+
+
+def test_tag_events_checkpoints_every_n_tagged_events(sample_events, monkeypatch, tmp_path):
+    call_count = {"n": 0}
+    checkpoint_snapshots = []
+
+    def fake_post_with_retry(session, api_key, messages, **kwargs):
+        call_count["n"] += 1
+        return _fake_response(["General Interest"], "Other")
+
+    def fake_write(events, path):
+        checkpoint_snapshots.append((path, call_count["n"]))
+
+    monkeypatch.setattr(tagging, "_post_with_retry", fake_post_with_retry)
+    monkeypatch.setattr(tagging, "_write_events_json", fake_write)
+
+    checkpoint_path = str(tmp_path / "checkpoint.json")
+    tagging.tag_events(
+        sample_events,
+        api_key=FAKE_API_KEY,
+        checkpoint_path=checkpoint_path,
+        checkpoint_every=3,
+    )
+
+    unique_ids = {event.event_id for event in sample_events}
+    assert len(unique_ids) == 9, "this test relies on the known shape of the fixture data"
+
+    # 9 is an exact multiple of 3, so checkpoints land at 3/6/9 with no
+    # extra trailing flush (the last checkpoint already covers everything).
+    assert checkpoint_snapshots == [
+        (checkpoint_path, 3), (checkpoint_path, 6), (checkpoint_path, 9),
+    ]
+
+
+def test_tag_events_writes_a_final_checkpoint_off_the_interval_boundary(
+    sample_events, monkeypatch, tmp_path
+):
+    call_count = {"n": 0}
+    checkpoint_snapshots = []
+
+    def fake_post_with_retry(session, api_key, messages, **kwargs):
+        call_count["n"] += 1
+        return _fake_response(["General Interest"], "Other")
+
+    def fake_write(events, path):
+        checkpoint_snapshots.append(call_count["n"])
+
+    monkeypatch.setattr(tagging, "_post_with_retry", fake_post_with_retry)
+    monkeypatch.setattr(tagging, "_write_events_json", fake_write)
+
+    tagging.tag_events(
+        sample_events,
+        api_key=FAKE_API_KEY,
+        checkpoint_path=str(tmp_path / "checkpoint.json"),
+        checkpoint_every=4,
+    )
+
+    assert len({event.event_id for event in sample_events}) == 9
+    # Periodic checkpoints at 4 and 8, then a final flush at 9 (not itself
+    # a multiple of 4) so the last event tagged is never left unsaved.
+    assert checkpoint_snapshots == [4, 8, 9]
+
+
+def test_tag_events_does_not_checkpoint_without_a_path(sample_events, monkeypatch):
+    monkeypatch.setattr(
+        tagging, "_post_with_retry",
+        lambda *a, **k: _fake_response(["General Interest"], "Other"),
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("_write_events_json should not be called without checkpoint_path")
+
+    monkeypatch.setattr(tagging, "_write_events_json", fail_if_called)
+
+    tagging.tag_events(sample_events, api_key=FAKE_API_KEY)  # no checkpoint_path given
+
+
+def test_tag_events_rejects_non_positive_checkpoint_every(sample_events, tmp_path):
+    with pytest.raises(ValueError):
+        tagging.tag_events(
+            sample_events,
+            api_key=FAKE_API_KEY,
+            checkpoint_path=str(tmp_path / "checkpoint.json"),
+            checkpoint_every=0,
+        )
+
+
+def test_write_events_json_writes_correct_content_and_no_leftover_temp_file(tmp_path):
+    events = [_make_event(title="A"), _make_event(title="B")]
+    path = tmp_path / "out.json"
+
+    tagging._write_events_json(events, str(path))
+
+    assert path.exists()
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert [event["title"] for event in written] == ["A", "B"]
+    # No leftover temp file from the write-then-rename.
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(".tmp_")] == []
+
+
+def test_tag_sample_events_checkpoints_to_output_path(monkeypatch, tmp_path):
+    call_count = {"n": 0}
+    checkpoint_snapshots = []
+    real_write = tagging._write_events_json
+
+    def fake_post_with_retry(session, api_key, messages, **kwargs):
+        call_count["n"] += 1
+        return _fake_response(["General Interest"], "Other")
+
+    def spy_write(events, path):
+        checkpoint_snapshots.append(call_count["n"])
+        real_write(events, path)  # still exercise the real (atomic) write
+
+    monkeypatch.setattr(tagging, "_post_with_retry", fake_post_with_retry)
+    monkeypatch.setattr(tagging, "_write_events_json", spy_write)
+
+    output_path = tmp_path / "sample_events_tagged.json"
+    tagging.tag_sample_events(
+        input_path=tagging.DEFAULT_SAMPLE_PATH,
+        output_path=str(output_path),
+        api_key=FAKE_API_KEY,
+        checkpoint_every=3,
+    )
+
+    assert checkpoint_snapshots == [3, 6, 9]
+    assert output_path.exists()
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(written) == 10  # full sample_events.json, duplicates included
