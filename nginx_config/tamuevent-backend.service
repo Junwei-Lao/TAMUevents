@@ -1,0 +1,33 @@
+# systemd unit for the FastAPI backend (src/helpers/backend.py), run behind
+# the nginx reverse proxy defined in tamuevent.com.conf (proxies /api/ to
+# 127.0.0.1:9191, matching the port bound below).
+#
+# Install: sudo cp tamuevent-backend.service /etc/systemd/system/
+#          sudo systemctl daemon-reload
+#          sudo systemctl enable --now tamuevent-backend
+#
+# Adjust User/WorkingDirectory/paths if you deploy somewhere other than
+# /var/www/tamuevent/backend (see nginx_config/README.md).
+
+[Unit]
+Description=TAMU Events FastAPI backend (uvicorn)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=tamuevent
+Group=tamuevent
+WorkingDirectory=/var/www/tamuevent/backend/src/helpers
+EnvironmentFile=/var/www/tamuevent/backend/.env
+ExecStart=/var/www/tamuevent/backend/.venv/bin/uvicorn backend:app --host 127.0.0.1 --port 9191 --workers 2
+Restart=on-failure
+RestartSec=5
+
+# Light sandboxing - relax if the app needs to write outside its own tree.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
