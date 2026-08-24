@@ -97,6 +97,10 @@ DB_NAME = "TAMU_events_storage_db"
 # read from or written to otherwise.
 MAINTENANCE_DB_NAME = "postgres"
 
+# Sentinel stored in categories_audience for events that don't list a
+# target audience - see normalize_audience.
+EVERYONE_AUDIENCE = "Everyone"
+
 # Loads db_username/db_password (and anything else) from .env into
 # os.environ, if present. A real environment variable always wins over
 # whatever's in .env.
@@ -134,6 +138,32 @@ def build_pool(events: Sequence[dict], field: str) -> List[str]:
             if value:
                 pool.add(value)
     return sorted(pool)
+
+
+def normalize_audience(categories_audience: Optional[Sequence[str]]) -> List[str]:
+    """Clean up a scraped `categories_audience` list before it's stored:
+
+    - Trims whitespace and drops blank/duplicate entries (defends against
+      the same value slipping in twice, or with inconsistent whitespace,
+      across different scrapes of the same event).
+    - If nothing's left (TAMU's calendar leaves this empty rather than
+      saying "everyone" explicitly), returns `[EVERYONE_AUDIENCE]` instead
+      of `[]`. An empty array is otherwise invisible to audience-filtered
+      queries (`categories_audience && ARRAY['Students']` never matches
+      `{}`), which would silently exclude "open to anyone" events from
+      every audience search instead of matching all of them.
+
+    A long-but-real list (e.g. an event explicitly tagged with most of the
+    known audience values) is left as-is - that's a different, legitimate
+    thing from "no audience was specified", and collapsing both cases to
+    the same sentinel would erase that distinction rather than fix it.
+    """
+    seen: List[str] = []
+    for value in categories_audience or []:
+        cleaned = (value or "").strip()
+        if cleaned and cleaned not in seen:
+            seen.append(cleaned)
+    return seen or [EVERYONE_AUDIENCE]
 
 
 def save_pool_to_json(pool: Sequence[str], path: str) -> None:
@@ -373,7 +403,7 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
                 e.get("description"),
                 e.get("location"),
                 e.get("categories") or [],
-                e.get("categories_audience") or [],
+                normalize_audience(e.get("categories_audience")),
                 e.get("is_canceled") or "",
             )
         )
@@ -423,6 +453,55 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
         )
     conn.commit()
     logger.info("Upserted %d events into events_before_tagging / events_after_tagging", len(events))
+
+
+def backfill_audiences(conn=None) -> int:
+    """One-off fix-up for events_before_tagging rows written before
+    normalize_audience existed: re-applies it to every stored row's
+    categories_audience (trims/dedupes values, and turns an empty array
+    into `[EVERYONE_AUDIENCE]` so it stops being invisible to
+    audience-filtered searches), and makes sure EVERYONE_AUDIENCE is
+    present in audience_pool so it shows up as a filter option.
+
+    Only rows whose normalized value actually differs are written, so
+    this is safe to run repeatedly (e.g. after every new batch of scraped
+    events lands) - already-normalized rows are left untouched. Returns
+    the number of rows updated.
+    """
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT event_id, date, date_time, categories_audience "
+                "FROM events_before_tagging"
+            )
+            rows = cur.fetchall()
+
+        changes = []
+        for row in rows:
+            fixed = normalize_audience(row["categories_audience"])
+            if fixed != (row["categories_audience"] or []):
+                changes.append((fixed, row["event_id"], row["date"], row["date_time"]))
+
+        if changes:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    "UPDATE events_before_tagging SET categories_audience = %s "
+                    "WHERE event_id = %s AND date = %s AND date_time = %s",
+                    changes,
+                )
+                cur.execute(
+                    "INSERT INTO audience_pool (name) VALUES (%s) ON CONFLICT (name) DO NOTHING",
+                    (EVERYONE_AUDIENCE,),
+                )
+            conn.commit()
+
+        logger.info("Backfilled categories_audience on %d/%d event(s)", len(changes), len(rows))
+        return len(changes)
+    finally:
+        if owns_conn:
+            conn.close()
 
 
 _AFTER_TOPIC_COLUMNS_SELECT = ", ".join(f"a.{column}" for column in _TOPIC_COLUMNS)
@@ -516,6 +595,26 @@ def get_events_by_event_type(event_type: str, conn=None) -> List[dict]:
             conn.close()
 
 
+def get_events_by_audience(audience: str, conn=None) -> List[dict]:
+    """Return events open to `audience` - either because it's explicitly
+    listed in categories_audience, or because the event carries the
+    EVERYONE_AUDIENCE sentinel (no audience was specified, see
+    normalize_audience). Uses array overlap (`&&`), so it's covered by
+    idx_events_before_categories_audience same as any other array query."""
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        wanted = [audience] if audience == EVERYONE_AUDIENCE else [audience, EVERYONE_AUDIENCE]
+        query = _JOINED_EVENT_SELECT + " WHERE b.categories_audience && %s ORDER BY b.event_id"
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, (wanted,))
+            rows = [dict(row) for row in cur.fetchall()]
+        return _attach_decoded_topics(rows)
+    finally:
+        if owns_conn:
+            conn.close()
+
+
 def list_topics_in_use(conn=None) -> List[str]:
     """Distinct topic leaf labels actually present in events_after_tagging
     - decoded from the OR of every row's bitflags per category (Postgres's
@@ -580,7 +679,11 @@ def initialize_database(
     logger.info("Loaded %d tagged events from %s", len(events), json_path)
 
     category_pool = build_pool(events, "categories")
-    audience_pool = build_pool(events, "categories_audience")
+    # EVERYONE_AUDIENCE is synthetic (normalize_audience's stand-in for a
+    # missing audience) - it won't turn up scanning the raw scraped data,
+    # so it's added by hand rather than relying on some event happening to
+    # already use that literal string.
+    audience_pool = sorted(set(build_pool(events, "categories_audience")) | {EVERYONE_AUDIENCE})
     logger.info(
         "Discovered %d distinct categories, %d distinct audiences",
         len(category_pool),
@@ -602,4 +705,4 @@ def initialize_database(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    initialize_database()
+    backfill_audiences()
