@@ -10,11 +10,11 @@
     "title": "Commencement and Commissioning",
     "description": "Please visit our websites for ceremony schedules, participating rules and guidelines, parking, FAQ's, and more.",
     "location": "Reed Arena",
-    "categories": ["Academic Calendar", "A"],
-    "categories_audience": ["Faculty", "Staff", "Students", "Visitors", "A"],
+    "categories": ["Academic Calendar"],
+    "categories_audience": ["Faculty", "Staff", "Students", "Visitors"],
     "is_canceled": "",
     "topics": { "Campus & Student Life": ["Traditions"] },
-    "event_type": "Commencement"
+    "event_type": "Ceremony / Tradition"
   },
   {
     "event_id": 385867,
@@ -27,11 +27,11 @@
     "title": "Third Coast Percussion: Murmurs in Time",
     "description": "Third Coast Percussion (TCP) is Chicago's GRAMMY Award-winning percussion quartet performing a genre-defying program.",
     "location": "Rudder Theater",
-    "categories": ["Arts & Entertainment", "B"],
-    "categories_audience": ["Faculty", "Staff", "Students", "Visitors", "B"],
+    "categories": ["Arts & Entertainment"],
+    "categories_audience": ["Faculty", "Staff", "Students", "Visitors"],
     "is_canceled": "",
     "topics": { "Arts & Culture": ["Music"] },
-    "event_type": "Musical Performance"
+    "event_type": "Arts / Entertainment"
   },
   {
     "event_id": 378574,
@@ -44,11 +44,11 @@
     "title": "Texas A&M University Volleyball vs Louisville",
     "description": "Texas A&M University Volleyball takes on Louisville in a conference matchup.",
     "location": "Reed Arena",
-    "categories": ["Sports & Athletics", "C"],
-    "categories_audience": ["Students", "Visitors", "C"],
+    "categories": ["Sports & Athletics"],
+    "categories_audience": ["Students", "Visitors"],
     "is_canceled": "",
     "topics": { "Sports & Recreation": ["Athletics"] },
-    "event_type": "Sporting Event"
+    "event_type": "Sports / Recreation"
   },
   {
     "event_id": 391022,
@@ -61,13 +61,13 @@
     "title": "AI and Robotics Seminar",
     "description": "A guest speaker series exploring recent advances in artificial intelligence and robotics research.",
     "location": "Zachry Engineering Education Complex",
-    "categories": ["Academic", "A"],
-    "categories_audience": ["Faculty", "Students", "A"],
+    "categories": ["Speakers, Forums, Conferences, Training & Workshops"],
+    "categories_audience": ["Faculty", "Students"],
     "is_canceled": "",
     "topics": {
       "STEM & Technology": ["Artificial Intelligence / Machine Learning", "Robotics"]
     },
-    "event_type": "Seminar"
+    "event_type": "Academic / Research"
   },
   {
     "event_id": 399120,
@@ -80,10 +80,10 @@
     "title": "Fall Career Fair",
     "description": "Meet with employers from across the country recruiting Aggies for internships and full-time roles.",
     "location": "Cotton Bowl, ADAC",
-    "categories": ["Career", "B"],
-    "categories_audience": ["Students", "B"],
+    "categories": ["Speakers, Forums, Conferences, Training & Workshops"],
+    "categories_audience": ["Students"],
     "is_canceled": "",
     "topics": { "Business & Career": ["Career Development"] },
-    "event_type": "Career Fair"
+    "event_type": "Career / Professional"
   }
 ]

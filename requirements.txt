@@ -3,3 +3,5 @@ bs4
 python-dotenv
 python-dateutil
 psycopg2-binary
+fastapi
+uvicorn

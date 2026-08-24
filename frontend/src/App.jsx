@@ -5,12 +5,6 @@ import EventList from "./components/EventList.jsx";
 import Footer from "./components/Footer.jsx";
 import { searchEvents } from "./api.js";
 import { DEFAULT_FILTERS } from "./filterOptions.js";
-import {
-  TOPIC_TAXONOMY,
-  EVENT_TYPE_TAXONOMY,
-  CATEGORY_OPTIONS,
-  AUDIENCE_OPTIONS,
-} from "./taxonomy.js";
 
 function toIsoDate(date) {
   const year = date.getFullYear();
@@ -19,29 +13,18 @@ function toIsoDate(date) {
   return `${year}-${month}-${day}`;
 }
 
-// docs/front_back_contract.md: a section with no explicit picks means "All"
-// - and "All" is sent as every value that section could ever hold, rather
-// than an omitted/empty field, since the contract always expects the field
-// present.
+// backend.py's SearchRequest / postgre_io.search_events (see
+// docs/back_db_contract.md) treat an empty dict/array as "no filter on this
+// field" - so "All" (no explicit picks) is sent as {} / [] as-is, not
+// expanded into every possible value.
 function buildRequestBody(range, filters) {
-  const topicTaxomony =
-    Object.keys(filters.topics).length > 0 ? filters.topics : TOPIC_TAXONOMY;
-  const eventType =
-    Object.keys(filters.event_type).length > 0 ? filters.event_type : EVENT_TYPE_TAXONOMY;
-  const categories =
-    filters.categories.length > 0 ? filters.categories : CATEGORY_OPTIONS;
-  const categoriesAudience =
-    filters.categories_audience.length > 0
-      ? filters.categories_audience
-      : AUDIENCE_OPTIONS;
-
   return {
     start_date: toIsoDate(range.from),
     end_date: toIsoDate(range.to),
-    topic_taxomony: topicTaxomony,
-    event_type: eventType,
-    categories,
-    categories_audience: categoriesAudience,
+    topic_taxomony: filters.topics,
+    event_type: filters.event_type,
+    categories: filters.categories,
+    categories_audience: filters.categories_audience,
   };
 }
 

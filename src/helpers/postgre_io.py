@@ -603,18 +603,25 @@ def get_events_by_event_type(event_type: str, conn=None) -> List[dict]:
 
 
 def get_events_by_audience(audience: str, conn=None) -> List[dict]:
-    """Return events open to `audience` - either because it's explicitly
-    listed in categories_audience, or because the event carries the
+    """Return events open to `audience`. `EVERYONE_AUDIENCE` is treated as
+    "all audiences" - equivalent to no audience filter at all, returning
+    every event regardless of who it's tagged for - not just events
+    literally carrying the EVERYONE_AUDIENCE sentinel. For any other
+    audience, matches events that explicitly list it *or* carry the
     EVERYONE_AUDIENCE sentinel (no audience was specified, see
     normalize_audience). Uses array overlap (`&&`), so it's covered by
     idx_events_before_categories_audience same as any other array query."""
     owns_conn = conn is None
     conn = conn or connect()
     try:
-        wanted = [audience] if audience == EVERYONE_AUDIENCE else [audience, EVERYONE_AUDIENCE]
-        query = _JOINED_EVENT_SELECT + " WHERE b.categories_audience && %s ORDER BY b.event_id"
+        if audience == EVERYONE_AUDIENCE:
+            query = _JOINED_EVENT_SELECT + " ORDER BY b.event_id"
+            params: tuple = ()
+        else:
+            query = _JOINED_EVENT_SELECT + " WHERE b.categories_audience && %s ORDER BY b.event_id"
+            params = ([audience, EVERYONE_AUDIENCE],)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(query, (wanted,))
+            cur.execute(query, params)
             rows = [dict(row) for row in cur.fetchall()]
         return _attach_decoded_topics(rows)
     finally:
@@ -700,6 +707,14 @@ def search_events(request: Optional[dict] = None, conn=None) -> List[dict]:
     calling this. Any key in it that isn't a real bitflag column is
     dropped rather than trusted, since it would otherwise be interpolated
     into the query as a column name.
+
+    `categories_audience`: EVERYONE_AUDIENCE ("Everyone") is treated as
+    "all audiences" - if it's among the requested values (alone or mixed
+    with specific ones, e.g. ["Everyone", "Students"]), no audience
+    condition is applied at all, matching every event regardless of who
+    it's tagged for. Otherwise, matches events that list any of the
+    requested audiences *or* carry the EVERYONE_AUDIENCE sentinel (no
+    audience was specified - see normalize_audience).
     """
     request = request or {}
     conditions: List[str] = []
@@ -740,14 +755,14 @@ def search_events(request: Optional[dict] = None, conn=None) -> List[dict]:
         params.append(categories)
 
     audiences = [v for v in (request.get("categories_audience") or []) if v]
-    if audiences:
+    if audiences and EVERYONE_AUDIENCE not in audiences:
         # An "open to everyone" event (see normalize_audience) satisfies
-        # any requested audience too.
-        wanted = list(audiences)
-        if EVERYONE_AUDIENCE not in wanted:
-            wanted.append(EVERYONE_AUDIENCE)
+        # any requested specific audience too.
         conditions.append("b.categories_audience && %s")
-        params.append(wanted)
+        params.append(audiences + [EVERYONE_AUDIENCE])
+    # else: either no audience filter was requested, or EVERYONE_AUDIENCE
+    # was explicitly one of the choices - "Everyone" means "all audiences",
+    # i.e. no restriction at all, so no condition is added either way.
 
     query = _JOINED_EVENT_SELECT
     if conditions:

@@ -1,4 +1,4 @@
-// API contract with the (future) FastAPI backend - see
+// API contract implemented by src/helpers/backend.py - see
 // docs/front_back_contract.md for the authoritative version.
 //
 // POST {API_BASE_URL}/events/search
@@ -11,10 +11,10 @@
 //     "categories": ["<value>", ...],
 //     "categories_audience": ["<value>", ...]
 //   }
-// All four filter fields are always present - "All" (no explicit picks) is
-// sent as the complete taxonomy/pool for that field rather than an omitted
-// key, since the contract doesn't model an optional/absent field. See
-// App.jsx's buildRequestBody.
+// All four filter fields are always present, but an empty {} / [] means
+// "All" (no filter on that field) - backend.py's SearchRequest and
+// postgre_io.search_events (docs/back_db_contract.md) both treat an
+// absent/empty field that way. See App.jsx's buildRequestBody.
 //
 // Response body:
 //   { "events": [ <Event>, ... ] }

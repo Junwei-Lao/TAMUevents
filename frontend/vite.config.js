@@ -34,16 +34,31 @@ function mockEventsApi() {
 
             // topic_taxomony / event_type arrive as {parent: [leaf, ...]} -
             // flatten to a leaf set for matching, ignoring parent grouping
-            // (a leaf label is unambiguous on its own).
+            // (a leaf label is unambiguous on its own). An empty/absent
+            // field means "no filter" - matches backend.py's SearchRequest
+            // and postgre_io.search_events (docs/back_db_contract.md).
             const flattenLeaves = (dict) => Object.values(dict || {}).flat();
 
             const overlapsArray = (fieldValues, selected) =>
-              (selected || []).some((v) => (fieldValues || []).includes(v));
+              !selected || selected.length === 0 ||
+              selected.some((v) => (fieldValues || []).includes(v));
 
             const overlapsDict = (eventTopics, requestedDict) => {
               const requestedLeaves = flattenLeaves(requestedDict);
+              if (requestedLeaves.length === 0) return true;
               const eventLeaves = flattenLeaves(eventTopics);
               return requestedLeaves.some((leaf) => eventLeaves.includes(leaf));
+            };
+
+            // event_type is only ever stored at the parent-category level
+            // (tagging.py collapses the model's leaf pick to its parent -
+            // see _validate_event_type), so only the selected parent keys
+            // matter here, mirroring backend.py's
+            // `list(payload.event_type.keys())`.
+            const matchesEventType = (eventValue, requestedDict) => {
+              const requestedParents = Object.keys(requestedDict || {});
+              if (requestedParents.length === 0) return true;
+              return requestedParents.includes(eventValue);
             };
 
             const filtered = events.filter((e) => {
@@ -51,7 +66,7 @@ function mockEventsApi() {
               const eventEnd = e.end_date || e.start_date;
               if (!(e.start_date <= end_date && eventEnd >= start_date)) return false;
               if (!overlapsDict(e.topics, topic_taxomony)) return false;
-              if (!flattenLeaves(event_type).includes(e.event_type)) return false;
+              if (!matchesEventType(e.event_type, event_type)) return false;
               if (!overlapsArray(e.categories, categories)) return false;
               if (!overlapsArray(e.categories_audience, categories_audience)) return false;
               return true;

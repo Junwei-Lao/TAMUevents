@@ -129,8 +129,28 @@ export const EVENT_TYPE_TAXONOMY = {
 };
 
 // Categories / categories_audience have no fixed taxonomy - they're
-// discovered pools (postgre_io.py's category_pool / audience_pool tables),
-// so real values can only come from the backend. Placeholders until that
-// endpoint exists.
-export const CATEGORY_OPTIONS = ["A", "B", "C"];
-export const AUDIENCE_OPTIONS = ["A", "B", "C"];
+// discovered pools, mirroring data/category_pool.json and
+// data/audience_pool.json (built by postgre_io.initialize_database by
+// scanning every event, and stored in Postgres as category_pool /
+// audience_pool). Keep these two arrays in sync by hand if those files
+// change - there's no endpoint yet to fetch them at runtime.
+export const CATEGORY_OPTIONS = [
+  "Academic Calendar",
+  "Arts & Entertainment",
+  "Campus Life",
+  "General Interest",
+  "International Students",
+  "Open Houses & Receptions",
+  "Speakers, Forums, Conferences, Training & Workshops",
+  "Sports & Athletics",
+];
+
+export const AUDIENCE_OPTIONS = [
+  "Faculty",
+  "Researcher",
+  "Residents",
+  "Staff",
+  "Students",
+  "Visitors",
+  "Youth (K-12)",
+];
