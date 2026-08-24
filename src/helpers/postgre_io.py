@@ -83,7 +83,7 @@ _TOPIC_COLUMNS: List[str] = list(TOPIC_CATEGORY_COLUMNS.values())
 
 DEFAULT_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
 DEFAULT_TAGGED_EVENTS_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "data", "sample_events_tagged.json"
+    os.path.dirname(__file__), "..", "..", "data", "events_tagged.json"
 )
 DEFAULT_CATEGORY_POOL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "category_pool.json"
@@ -453,6 +453,45 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
         )
     conn.commit()
     logger.info("Upserted %d events into events_before_tagging / events_after_tagging", len(events))
+
+
+def get_event_cancellation_status(conn=None) -> Dict[Tuple[int, str, str], str]:
+    """Return {(event_id, date, date_time): is_canceled} for every row
+    currently in events_before_tagging - the cheap snapshot the nightly
+    refresh job (main.py) diffs a fresh scrape against, so it can tell
+    "brand new event" (key absent) apart from "same event, cancellation
+    flipped" (key present, value differs) apart from "nothing changed"
+    (key present, value the same) without re-tagging or re-upserting
+    anything that hasn't actually changed."""
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT event_id, date, date_time, is_canceled FROM events_before_tagging")
+            return {(event_id, date_, date_time): is_canceled
+                     for event_id, date_, date_time, is_canceled in cur.fetchall()}
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def update_is_canceled(conn, changes: Sequence[Tuple[int, str, str, str]]) -> None:
+    """Update just the is_canceled column on existing rows, given `changes`
+    as (event_id, date, date_time, new_is_canceled) tuples. Used by the
+    nightly refresh job for events whose identity (event_id, date,
+    date_time) is unchanged but whose cancellation status flipped - no need
+    to re-tag or touch anything else about the row for that."""
+    if not changes:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            "UPDATE events_before_tagging SET is_canceled = %s "
+            "WHERE event_id = %s AND date = %s AND date_time = %s",
+            [(is_canceled, event_id, date_, date_time)
+             for event_id, date_, date_time, is_canceled in changes],
+        )
+    conn.commit()
+    logger.info("Updated is_canceled on %d event(s)", len(changes))
 
 
 def backfill_audiences(conn=None) -> int:
