@@ -2,8 +2,11 @@
 DeepSeek API.
 
 The taxonomy and prompt design are documented in classification.md at the
-repo root; the dicts below are the canonical copy that prompt is generated
-from (keep classification.md in sync if these change).
+repo root; `schema.py`'s TOPIC_TAXONOMY / EVENT_TYPE_TAXONOMY dicts are the
+canonical copy the prompt below is generated from (keep classification.md
+in sync if those change - and see schema.py's own docstring for why the
+taxonomy lives there rather than here: postgre_io.py needs it too, to
+store `topics` as per-category bitflags).
 
 The API key is read from the DEEPSEEK_API_KEY environment variable, which
 can either be set directly or provided via a .env file at the repo root
@@ -11,14 +14,19 @@ can either be set directly or provided via a .env file at the repo root
 priority over .env if both are set).
 
 Pipeline:
-  1. Take Event objects, e.g. the output of fetch_events.py, or loaded from
-     a saved sample_events.json.
-  2. Build a per-event prompt from its title/description/location/date/
+  1. Load all Event objects, from a saved sample_events.json or (once
+     postgre_io.py exists) the database.
+  2. Group them by event_id and tag only one representative per id -
+     scraped feeds sometimes list the same event more than once (see the
+     duplicate event_id 372167 entries in data/sample_events.json), and
+     there's no reason to pay for the same classification twice.
+  3. Build a per-event prompt from its title/description/location/date/
      source categories.
-  3. Call DeepSeek's chat completion API (JSON output mode) and validate
+  4. Call DeepSeek's chat completion API (JSON output mode) and validate
      the labels it returns against the closed taxonomy, falling back to
      "Other" on anything invalid or on a request failure.
-  4. Write topics/event_type back onto the Event.
+  5. Write topics/event_type back onto the Event, and copy the same
+     result onto every other Event sharing that event_id.
 """
 
 import json
@@ -31,12 +39,19 @@ from typing import Dict, List, Optional
 import requests
 from dotenv import load_dotenv
 
-from schema import Event
+from schema import (
+    EVENT_TYPE_LEAF_TO_CATEGORY,
+    EVENT_TYPE_TAXONOMY,
+    OTHER_EVENT_TYPE,
+    OTHER_TOPIC,
+    TOPIC_TAXONOMY,
+    Event,
+)
 
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
-DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEEPSEEK_MODEL = "deepseek-v4-pro"
 DEFAULT_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
 DEFAULT_SAMPLE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "sample_events.json"
@@ -56,122 +71,6 @@ DESCRIPTION_CHAR_LIMIT = 1500
 # a real deployment env var still wins over whatever's in .env.
 load_dotenv(DEFAULT_ENV_PATH)
 
-OTHER_TOPIC = "Other / Uncategorized"
-OTHER_EVENT_TYPE = "Other"
-
-TOPIC_TAXONOMY: Dict[str, List[str]] = {
-    "STEM & Technology": [
-        "Computer Science", "Artificial Intelligence / Machine Learning", "Data Science",
-        "Mathematics / Statistics", "Physics", "Chemistry", "Biology / Life Sciences",
-        "Engineering", "Materials Science", "Information Technology", "Robotics",
-        "Cybersecurity", "Biotechnology", "Other STEM",
-    ],
-    "Health & Medicine": [
-        "Public Health", "Medicine", "Nursing", "Mental Health & Wellness", "Nutrition",
-        "Exercise / Fitness", "Healthcare", "Epidemiology", "Biomedical Science",
-        "Disability / Accessibility", "Other Health",
-    ],
-    "Business & Career": [
-        "Business", "Finance", "Accounting", "Marketing", "Entrepreneurship", "Management",
-        "Leadership Development", "Career Development", "Job Search / Recruiting",
-        "Professional Development", "Industry / Corporate",
-    ],
-    "Social Sciences & Politics": [
-        "Political Science", "Government / Public Policy", "Sociology", "Psychology",
-        "Anthropology", "International Relations", "Communication", "Social Justice",
-        "Community / Society", "Economics",
-    ],
-    "Humanities": [
-        "History", "Philosophy", "Literature", "English", "Languages", "Linguistics",
-        "Religion", "Classics", "Ethics", "Cultural Studies",
-    ],
-    "Arts & Culture": [
-        "Visual Arts", "Music", "Theater", "Dance", "Film / Media", "Photography",
-        "Creative Writing", "Museums / Exhibitions", "Cultural Events",
-    ],
-    "Education": [
-        "Teaching", "Pedagogy", "Educational Research", "Academic Success", "Study Skills",
-        "Advising", "Student Learning",
-    ],
-    "Agriculture & Environment": [
-        "Agriculture", "Agribusiness", "Animal Science", "Plant Science", "Food Science",
-        "Environmental Science", "Ecology", "Sustainability", "Climate", "Natural Resources",
-        "Conservation", "Horticulture",
-    ],
-    "International & Cultural": [
-        "International Affairs", "International Students", "Global Studies",
-        "Cross-cultural", "Cultural Heritage", "Language / Culture",
-    ],
-    "Campus & Student Life": [
-        "Student Life", "Campus Community", "Student Organizations", "Volunteering",
-        "Community Service", "Student Leadership", "Traditions", "Diversity & Inclusion",
-        "Residential Life",
-    ],
-    "General / Interdisciplinary": [
-        "Interdisciplinary Research", "General Academic", "University-wide",
-        "General Interest", OTHER_TOPIC,
-    ],
-}
-
-EVENT_TYPE_TAXONOMY: Dict[str, List[str]] = {
-    "Academic / Research": [
-        "Lecture", "Seminar", "Colloquium", "Research Talk", "Guest Speaker",
-        "Panel Discussion", "Research Presentation", "Research Showcase",
-    ],
-    "Conference / Large Academic Event": [
-        "Conference", "Symposium", "Summit", "Convention", "Research Conference",
-        "Academic Meeting",
-    ],
-    "Workshop / Training": [
-        "Workshop", "Hands-on Workshop", "Training", "Tutorial", "Certification",
-        "Skill Development", "Software / Technical Training", "Hackathon / Case Competition",
-    ],
-    "Career / Professional": [
-        "Career Fair", "Job Fair", "Employer Information Session", "Recruiting Event",
-        "Networking", "Resume / CV Workshop", "Interview Preparation",
-        "Professional Development", "Industry Talk", "Graduate School Preparation",
-    ],
-    "Student Organization": [
-        "Club Meeting", "Organization Meeting", "Student Group Event", "Student Leadership",
-        "Organization Recruitment", "Club Social",
-    ],
-    "Social / Community": [
-        "Social", "Mixer", "Networking Social", "Community Gathering", "Party", "Festival",
-        "Picnic", "Game Night", "Volunteer Event", "Community Service", "Fundraiser",
-        "Religious / Worship Service",
-    ],
-    "Arts / Entertainment": [
-        "Concert", "Musical Performance", "Theater Performance", "Dance Performance",
-        "Film Screening", "Art Exhibition", "Gallery Event", "Cultural Performance",
-    ],
-    "Sports / Recreation": [
-        "Sporting Event", "Intramural", "Club Sport", "Fitness Class",
-        "Recreational Activity", "Outdoor Activity", "Tournament", "Athletic Competition",
-    ],
-    "Orientation / Recruitment": [
-        "New Student Orientation", "Transfer Orientation", "Graduate Orientation",
-        "Welcome Event", "Admissions Event", "Open House", "Prospective Student Event",
-        "Recruitment Event",
-    ],
-    "Health / Wellness": [
-        "Health Screening", "Wellness Event", "Fitness Event", "Mental Health Workshop",
-        "Health Education", "Medical / Health Consultation",
-    ],
-    "Ceremony / Tradition": [
-        "Ceremony", "Commencement", "Memorial", "University Tradition", "Recognition",
-        "Award Ceremony", "Dedication", "Anniversary",
-    ],
-    "Administrative / Information": [
-        "Information Session", "Advising", "Town Hall", "Q&A", "Office Hours",
-        "Policy Meeting", "Administrative Meeting",
-    ],
-    "Exhibition / Showcase": [
-        "Research Exhibition", "Student Showcase", "Project Showcase", "Poster Session",
-        "Demonstration", "Open Lab",
-    ],
-    "Other": [OTHER_EVENT_TYPE, "Unknown"],
-}
-
 
 def _format_taxonomy(taxonomy: Dict[str, List[str]]) -> str:
     return "\n".join(
@@ -188,7 +87,7 @@ def _build_system_prompt() -> str:
         '2. "event_type": exactly 1 label from the EVENT_TYPE taxonomy below - the single '
         "best-fitting type.\n\n"
         "Only output labels copied exactly (spelling, punctuation, capitalization) from the "
-        f'taxonomies below. Never invent a label. If nothing fits well, use "{OTHER_TOPIC}" '
+        f'taxonomies below. Never invent a label. '
         f'for topics or "{OTHER_EVENT_TYPE}" for event_type.\n\n'
         "TOPIC taxonomy (category: leaf labels):\n"
         f"{_format_taxonomy(TOPIC_TAXONOMY)}\n\n"
@@ -203,9 +102,6 @@ SYSTEM_PROMPT = _build_system_prompt()
 
 _TOPIC_LEAVES = {
     leaf.lower(): leaf for leaves in TOPIC_TAXONOMY.values() for leaf in leaves
-}
-_EVENT_TYPE_LEAVES = {
-    leaf.lower(): leaf for leaves in EVENT_TYPE_TAXONOMY.values() for leaf in leaves
 }
 
 
@@ -295,8 +191,11 @@ def _validate_topics(raw) -> List[str]:
 
 
 def _validate_event_type(raw) -> str:
-    if isinstance(raw, str) and raw.strip().lower() in _EVENT_TYPE_LEAVES:
-        return _EVENT_TYPE_LEAVES[raw.strip().lower()]
+    """Validate the model's event_type pick against the leaf taxonomy, then
+    collapse it to its parent category - we only store the primary class
+    (e.g. "Lecture" -> "Academic / Research"), not the specific leaf."""
+    if isinstance(raw, str) and raw.strip().lower() in EVENT_TYPE_LEAF_TO_CATEGORY:
+        return EVENT_TYPE_LEAF_TO_CATEGORY[raw.strip().lower()]
     return OTHER_EVENT_TYPE
 
 
@@ -330,20 +229,65 @@ def tag_event(
     return event
 
 
+def load_events_from_json(path: str = DEFAULT_SAMPLE_PATH) -> List[Event]:
+    """Load Events from a saved events JSON file, e.g. the output of
+    fetch_events.fetch_sample_events / fetch_events.save_events_to_json."""
+    with open(path, "r", encoding="utf-8") as fh:
+        raw_events = json.load(fh)
+    return [Event(**item) for item in raw_events]
+
+
+def load_events_from_db() -> List[Event]:
+    """Load Events from the database. Not wired up yet - postgre_io.py is
+    still an empty placeholder with no read function to call."""
+    raise NotImplementedError(
+        "Loading events from the database isn't implemented yet "
+        "(src/helpers/postgre_io.py has no read function). "
+        "Use load_events_from_json() for now."
+    )
+
+
+def _group_by_event_id(events: List[Event]) -> Dict[int, List[Event]]:
+    """Group events by event_id, preserving first-seen order of ids.
+    Scraped feeds sometimes list the same event more than once (see the
+    duplicate event_id 372167 entries in data/sample_events.json)."""
+    groups: Dict[int, List[Event]] = {}
+    for event in events:
+        groups.setdefault(event.event_id, []).append(event)
+    return groups
+
+
 def tag_events(
     events: List[Event],
     api_key: Optional[str] = None,
     request_delay_seconds: float = DEFAULT_REQUEST_DELAY_SECONDS,
 ) -> List[Event]:
     """Classify a list of Events in place (e.g. the output of
-    fetch_events.fetch_all_events) and return the same list."""
+    fetch_events.fetch_all_events) and return the same list.
+
+    Events sharing the same event_id are only sent to the API once - the
+    first occurrence is tagged, and the resulting topics/event_type are
+    copied onto every other event with that id.
+    """
     api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set")
 
     session = requests.Session()
-    for event in events:
-        tag_event(event, api_key, session)
+    groups = _group_by_event_id(events)
+    duplicate_count = len(events) - len(groups)
+    if duplicate_count:
+        logger.info(
+            "Skipping %d duplicate event(s) by id; tagging %d unique event(s)",
+            duplicate_count, len(groups),
+        )
+
+    for group in groups.values():
+        representative, duplicates = group[0], group[1:]
+        tag_event(representative, api_key, session)
+        for duplicate in duplicates:
+            duplicate.topics = list(representative.topics)
+            duplicate.event_type = representative.event_type
         if request_delay_seconds:
             time.sleep(request_delay_seconds)
 
@@ -355,12 +299,10 @@ def tag_sample_events(
     output_path: str = DEFAULT_TAGGED_SAMPLE_PATH,
     api_key: Optional[str] = None,
 ) -> List[Event]:
-    """Load events from a saved sample_events.json (e.g. from
-    fetch_events.fetch_sample_events), tag them, and write the tagged
-    events to output_path. Standalone utility for local testing."""
-    with open(input_path, "r", encoding="utf-8") as fh:
-        raw_events = json.load(fh)
-    events = [Event(**item) for item in raw_events]
+    """Load events from a saved sample_events.json, tag them (deduplicated
+    by event_id), and write the tagged events to output_path. Standalone
+    utility for local testing."""
+    events = load_events_from_json(input_path)
 
     tag_events(events, api_key=api_key)
 

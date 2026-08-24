@@ -2,6 +2,7 @@ import { useState } from "react";
 import Header from "./components/Header.jsx";
 import FilterDrawer from "./components/FilterDrawer.jsx";
 import EventList from "./components/EventList.jsx";
+import Footer from "./components/Footer.jsx";
 import { searchEvents } from "./api.js";
 import { ALL_VALUE, DEFAULT_FILTERS } from "./filterOptions.js";
 
@@ -81,6 +82,7 @@ export default function App() {
       <main className="main-content">
         <EventList events={events} isLoading={isLoading} error={error} />
       </main>
+      <Footer />
     </div>
   );
 }

@@ -4,3 +4,4 @@ tests/__pycache__
 .env
 classification.md
 .pytest_cache
+data/archived

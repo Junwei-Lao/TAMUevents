@@ -83,7 +83,32 @@ def test_tag_event_sends_canonical_system_prompt_and_applies_response(sample_eve
         "content": tagging._build_user_prompt(event),
     }
     assert event.topics == ["Music"]
-    assert event.event_type == "Concert"
+    # event_type is stored as the leaf's parent category, not the leaf itself.
+    assert event.event_type == "Arts / Entertainment"
+
+
+@pytest.mark.parametrize(
+    "leaf, expected_category",
+    [
+        ("Lecture", "Academic / Research"),
+        ("lecture", "Academic / Research"),  # case-insensitive match
+        ("Commencement", "Ceremony / Tradition"),
+        ("Concert", "Arts / Entertainment"),
+        ("Other", "Other"),
+        ("Unknown", "Other"),
+    ],
+)
+def test_tag_event_collapses_event_type_leaf_to_category(
+    sample_events, monkeypatch, leaf, expected_category
+):
+    event = sample_events[0]
+    monkeypatch.setattr(
+        tagging, "_post_with_retry", lambda *a, **k: _fake_response(["General Interest"], leaf)
+    )
+
+    tagging.tag_event(event, FAKE_API_KEY)
+
+    assert event.event_type == expected_category
 
 
 def test_tag_event_falls_back_on_invalid_labels(sample_events, monkeypatch):
@@ -115,14 +140,47 @@ def test_tag_event_falls_back_on_request_failure(sample_events, monkeypatch):
     assert event.event_type == tagging.OTHER_EVENT_TYPE
 
 
+def test_tag_events_deduplicates_by_id_and_propagates_results(sample_events, monkeypatch):
+    # data/sample_events.json's first two entries share event_id 372167 -
+    # a real duplicate from the scraper, not a fabricated one.
+    duplicate_pair = [e for e in sample_events if e.event_id == 372167]
+    assert len(duplicate_pair) == 2, (
+        "expected the known duplicate event_id 372167 pair in the fixture data"
+    )
+
+    call_count = {"n": 0}
+
+    def fake_post_with_retry(session, api_key, messages, **kwargs):
+        call_count["n"] += 1
+        return _fake_response(["Traditions"], "Ceremony")
+
+    monkeypatch.setattr(tagging, "_post_with_retry", fake_post_with_retry)
+
+    tagging.tag_events(sample_events, api_key=FAKE_API_KEY)
+
+    unique_ids = {event.event_id for event in sample_events}
+    assert call_count["n"] == len(unique_ids)
+    assert call_count["n"] < len(sample_events)
+
+    first, second = duplicate_pair
+    assert first.topics == ["Traditions"]
+    assert first.event_type == "Ceremony / Tradition"
+    assert second.topics == first.topics
+    assert second.event_type == first.event_type
+    # Copied, not aliased - mutating one event's list must not affect the other.
+    assert second.topics is not first.topics
+
+
 def test_tag_sample_events_end_to_end_from_data_dir(monkeypatch, tmp_path):
     """Runs the full tag_sample_events() pipeline against the real
     data/sample_events.json input, with only the network call mocked."""
-    monkeypatch.setattr(
-        tagging,
-        "_post_with_retry",
-        lambda *a, **k: _fake_response(["General Interest"], "Other"),
-    )
+    call_count = {"n": 0}
+
+    def fake_post_with_retry(session, api_key, messages, **kwargs):
+        call_count["n"] += 1
+        return _fake_response(["General Interest"], "Other")
+
+    monkeypatch.setattr(tagging, "_post_with_retry", fake_post_with_retry)
 
     output_path = tmp_path / "sample_events_tagged.json"
     tagged = tagging.tag_sample_events(
@@ -133,6 +191,9 @@ def test_tag_sample_events_end_to_end_from_data_dir(monkeypatch, tmp_path):
 
     raw_input = json.load(open(tagging.DEFAULT_SAMPLE_PATH, "r", encoding="utf-8"))
     assert len(tagged) == len(raw_input)
+    # Fewer API calls than events, because of the duplicate event_id 372167 pair.
+    assert call_count["n"] == len({event.event_id for event in tagged})
+    assert call_count["n"] < len(raw_input)
     for event in tagged:
         assert event.topics == ["General Interest"]
         assert event.event_type == "Other"

@@ -1,7 +1,29 @@
-"""Data structures shared across the scraping/parsing pipeline."""
+"""Data structures shared across the scraping/parsing/storage pipeline.
 
+Topic taxonomy
+--------------
+`TOPIC_TAXONOMY` / `EVENT_TYPE_TAXONOMY` are the canonical taxonomy
+definitions - the prompt `tagging.py` sends to DeepSeek is generated from
+these dicts, and `postgre_io.py` stores events against them. See
+classification.md at the repo root for the human-readable copy (keep it in
+sync if these change).
+
+`topics` is multi-label (an event can be 1-3 leaves), so postgre_io.py
+doesn't store it as one column per leaf (100+ leaves across categories,
+several containing spaces/slashes/ampersands - not valid bare SQL
+identifiers - and some leaf names, e.g. "Other", repeat across categories)
+or a single TEXT[] (see the two functions below for why bitflags won).
+Instead, each *top-level category* (there are only ~11, they're stable,
+and their names are controlled by us, not scraped) becomes one 32-bit
+integer column, and each leaf within that category is a bit position -
+`encode_topic_flags`/`decode_topic_flags` convert between a list of leaf
+labels (e.g. `Event.topics`) and `{category_column_name: bitmask}`. Storing
+multiple topics under the same category is then just OR-ing their bits.
+"""
+
+import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -33,3 +55,311 @@ class FeedVisitStatus:
     feed_url: str
     last_visited: str  # ISO 8601 timestamp
     event_count: int = 0
+
+
+OTHER_TOPIC = "Other / Uncategorized"
+OTHER_EVENT_TYPE = "Other"
+
+TOPIC_TAXONOMY: Dict[str, List[str]] = {
+    "STEM & Technology": [
+        "Computer Science",
+        "Artificial Intelligence / Machine Learning",
+        "Data Science",
+        "Mathematics / Statistics",
+        "Physics",
+        "Chemistry",
+        "Biology / Life Sciences",
+        "Engineering",
+        "Materials Science",
+        "Earth & Space Sciences",
+        "Energy & Energy Systems",
+        "Information Technology",
+        "Robotics",
+        "Cybersecurity",
+        "Biotechnology",
+        "Nanotechnology",
+        "Other STEM",
+    ],
+
+    "Health & Medicine": [
+        "Public Health",
+        "Medicine",
+        "Nursing",
+        "Mental Health & Wellness",
+        "Nutrition",
+        "Healthcare",
+        "Epidemiology",
+        "Biomedical Science",
+        "Disability / Accessibility",
+        "Other Health",
+    ],
+
+    "Business & Career": [
+        "Business",
+        "Finance",
+        "Accounting",
+        "Marketing",
+        "Entrepreneurship",
+        "Management",
+        "Leadership",
+        "Career Development",
+        "Job Search / Recruiting",
+        "Professional Development",
+        "Industry / Corporate",
+        "Other Business",
+    ],
+
+    "Social Sciences & Politics": [
+        "Political Science",
+        "Government / Public Policy",
+        "Sociology",
+        "Psychology",
+        "Anthropology",
+        "International Relations",
+        "Social Justice",
+        "Community Studies",
+        "Economics",
+        "Other Social Sciences",
+    ],
+
+    "Humanities": [
+        "History",
+        "Philosophy",
+        "Literature",
+        "English",
+        "Languages",
+        "Linguistics",
+        "Religion",
+        "Classics",
+        "Ethics",
+        "Cultural Studies",
+        "Other Humanities",
+    ],
+
+    "Arts & Culture": [
+        "Visual Arts",
+        "Music",
+        "Theater",
+        "Dance",
+        "Film / Media",
+        "Photography",
+        "Creative Writing",
+        "Museums / Exhibitions",
+        "Cultural Heritage",
+        "Other Arts & Culture",
+    ],
+
+    "Architecture & Design": [
+        "Architecture",
+        "Urban Planning",
+        "Landscape Architecture",
+        "Urban Design",
+        "Interior Design",
+        "Construction",
+        "Real Estate / Built Environment",
+        "Design",
+        "Other Architecture & Design",
+    ],
+
+    "Law & Legal Studies": [
+        "Law",
+        "Legal Studies",
+        "Criminal Justice",
+        "Human Rights",
+        "Legal Policy",
+        "Other Law",
+    ],
+
+    "Education": [
+        "Teaching",
+        "Pedagogy",
+        "Educational Research",
+        "Academic Success",
+        "Study Skills",
+        "Advising",
+        "Student Learning",
+        "Other Education",
+    ],
+
+    "Agriculture & Environment": [
+        "Agriculture",
+        "Agribusiness",
+        "Animal Science",
+        "Plant Science",
+        "Food Science",
+        "Environmental Science",
+        "Ecology",
+        "Sustainability",
+        "Climate",
+        "Natural Resources",
+        "Conservation",
+        "Horticulture",
+        "Other Agriculture & Environment",
+    ],
+
+    "International & Global Studies": [
+        "International Affairs",
+        "Global Studies",
+        "International Development",
+        "Cross-cultural Studies",
+        "Global Affairs",
+        "Other International & Global Studies",
+    ],
+
+    "Campus & Student Life": [
+        "Student Life",
+        "Campus Community",
+        "Student Organizations",
+        "Volunteering",
+        "Community Service",
+        "Student Leadership",
+        "Traditions",
+        "Diversity & Inclusion",
+        "Residential Life",
+        "Other Campus & Student Life",
+    ],
+
+    "Sports & Recreation": [
+    "Athletics",
+    "Gymnastics",
+    "Fitness",
+    "Sport Competitions / Tournaments",
+    "Sport Science",
+    "Other Sports & Recreation",
+    ],
+
+    "General / Interdisciplinary": [
+        "Interdisciplinary Research",
+        "General Academic",
+        "General Interest",
+    ],
+}
+
+EVENT_TYPE_TAXONOMY: Dict[str, List[str]] = {
+    "Academic / Research": [
+        "Lecture", "Seminar", "Colloquium", "Research Talk", "Guest Speaker",
+        "Panel Discussion", "Research Presentation", "Research Showcase",
+    ],
+    "Conference / Large Academic Event": [
+        "Conference", "Symposium", "Summit", "Convention", "Research Conference",
+        "Academic Meeting",
+    ],
+    "Workshop / Training": [
+        "Workshop", "Hands-on Workshop", "Training", "Tutorial", "Certification",
+        "Skill Development", "Software / Technical Training", "Hackathon / Case Competition",
+    ],
+    "Career / Professional": [
+        "Career Fair", "Job Fair", "Employer Information Session", "Recruiting Event",
+        "Networking", "Resume / CV Workshop", "Interview Preparation",
+        "Professional Development", "Industry Talk", "Graduate School Preparation",
+    ],
+    "Student Organization": [
+        "Club Meeting", "Organization Meeting", "Student Group Event", "Student Leadership",
+        "Organization Recruitment", "Club Social",
+    ],
+    "Social / Community": [
+        "Social", "Mixer", "Networking Social", "Community Gathering", "Party", "Festival",
+        "Picnic", "Game Night", "Volunteer Event", "Community Service", "Fundraiser",
+        "Religious / Worship Service",
+    ],
+    "Arts / Entertainment": [
+        "Concert", "Musical Performance", "Theater Performance", "Dance Performance",
+        "Film Screening", "Art Exhibition", "Gallery Event", "Cultural Performance",
+    ],
+    "Sports / Recreation": [
+        "Sporting Event", "Intramural", "Club Sport", "Fitness Class",
+        "Recreational Activity", "Outdoor Activity", "Tournament", "Athletic Competition",
+    ],
+    "Orientation / Recruitment": [
+        "New Student Orientation", "Transfer Orientation", "Graduate Orientation",
+        "Welcome Event", "Admissions Event", "Open House", "Prospective Student Event",
+        "Recruitment Event",
+    ],
+    "Health / Wellness": [
+        "Health Screening", "Wellness Event", "Fitness Event", "Mental Health Workshop",
+        "Health Education", "Medical / Health Consultation",
+    ],
+    "Ceremony / Tradition": [
+        "Ceremony", "Commencement", "Memorial", "University Tradition", "Recognition",
+        "Award Ceremony", "Dedication", "Anniversary",
+    ],
+    "Administrative / Information": [
+        "Information Session", "Advising", "Town Hall", "Q&A", "Office Hours",
+        "Policy Meeting", "Administrative Meeting",
+    ],
+    "Exhibition / Showcase": [
+        "Research Exhibition", "Student Showcase", "Project Showcase", "Poster Session",
+        "Demonstration", "Open Lab",
+    ],
+    "Other": [OTHER_EVENT_TYPE, "Unknown"],
+}
+
+# {lowercased leaf label: category}. event_type is single-label and only
+# ever stored as its primary class (e.g. "Lecture" -> "Academic / Research"),
+# not the specific leaf - see tagging.py's _validate_event_type - so unlike
+# topics it needs no bit position, just this lookup.
+EVENT_TYPE_LEAF_TO_CATEGORY: Dict[str, str] = {
+    leaf.lower(): category
+    for category, leaves in EVENT_TYPE_TAXONOMY.items()
+    for leaf in leaves
+}
+
+
+def _slugify_category(category: str) -> str:
+    """"STEM & Technology" -> "stem_technology" - used as both a Postgres
+    column name (postgre_io.py) and a dict key, so it must be a valid bare
+    SQL identifier."""
+    return re.sub(r"[^a-z0-9]+", "_", category.lower()).strip("_")
+
+
+# {category: column_name}, e.g. "STEM & Technology" -> "stem_technology".
+# One events_after_tagging column per entry - see postgre_io.py.
+TOPIC_CATEGORY_COLUMNS: Dict[str, str] = {
+    category: _slugify_category(category) for category in TOPIC_TAXONOMY
+}
+
+# {lowercased leaf label: (category, bit index within that category's list)}
+_TOPIC_LEAF_LOCATION: Dict[str, Tuple[str, int]] = {
+    leaf.lower(): (category, index)
+    for category, leaves in TOPIC_TAXONOMY.items()
+    for index, leaf in enumerate(leaves)
+}
+
+for _category, _leaves in TOPIC_TAXONOMY.items():
+    if len(_leaves) > 32:
+        raise ValueError(
+            f"Category {_category!r} has {len(_leaves)} leaves, which overflows the "
+            "32-bit flag column postgre_io.py stores it in"
+        )
+
+
+def encode_topic_flags(topics: List[str]) -> Dict[str, int]:
+    """Convert a list of leaf topic labels (e.g. Event.topics) into
+    {category_column_name: bitmask}, OR-ing together every topic that
+    falls under the same category. Unrecognized labels are skipped.
+    Categories with no matching topic are simply absent from the result -
+    callers should treat a missing key as 0."""
+    flags: Dict[str, int] = {}
+    for label in topics:
+        location = _TOPIC_LEAF_LOCATION.get((label or "").strip().lower())
+        if location is None:
+            continue
+        category, bit_index = location
+        column = TOPIC_CATEGORY_COLUMNS[category]
+        flags[column] = flags.get(column, 0) | (1 << bit_index)
+    return flags
+
+
+def decode_topic_flags(flags: Dict[str, int]) -> List[str]:
+    """Inverse of encode_topic_flags: given {category_column_name: bitmask}
+    (missing/zero entries are fine), return the sorted-by-category list of
+    leaf topic labels those bits represent."""
+    labels: List[str] = []
+    for category, leaves in TOPIC_TAXONOMY.items():
+        mask = flags.get(TOPIC_CATEGORY_COLUMNS[category]) or 0
+        if not mask:
+            continue
+        for bit_index, leaf in enumerate(leaves):
+            if mask & (1 << bit_index):
+                labels.append(leaf)
+    return labels

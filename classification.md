@@ -6,10 +6,11 @@ DeepSeek API to do it. `audience` is **not** tagged here — it's already
 present in scraped data as `categories_audience`.
 
 The taxonomy below is the human-readable copy for reference and review.
-**`src/helpers/tagging.py`'s `TOPIC_TAXONOMY` / `EVENT_TYPE_TAXONOMY` dicts
-are the canonical source** — the prompt sent to the model is generated
-from those dicts, not from this file. If you change a label, change it in
-`tagging.py` and mirror the edit here.
+**`src/helpers/schema.py`'s `TOPIC_TAXONOMY` / `EVENT_TYPE_TAXONOMY` dicts
+are the canonical source** — the prompt `tagging.py` sends to the model is
+generated from those dicts, and `postgre_io.py` stores events against them
+too (as per-category bitflags for `topics` - see schema.py's docstring).
+If you change a label, change it in `schema.py` and mirror the edit here.
 
 ## Changes from the original draft taxonomy
 
@@ -29,14 +30,25 @@ from those dicts, not from this file. If you change a label, change it in
 
 ## Output fields
 
-| Field        | Cardinality | Notes                                                        |
-|--------------|-------------|----------------------------------------------------------------|
-| `topics`     | 1-3 labels  | Multi-label; more than one only if genuinely interdisciplinary |
-| `event_type` | exactly 1   | An event has one dominant type                                 |
+| Field        | Cardinality | Stored as                                                       |
+|--------------|-------------|------------------------------------------------------------------|
+| `topics`     | 1-3 labels  | Leaf labels (multi-label; more than one only if genuinely interdisciplinary) |
+| `event_type` | exactly 1   | **Top-level category only** — see below                          |
 
-Both are **leaf labels only** — the model never outputs a parent category.
-`tagging.py` derives the category from the leaf via the taxonomy dict, so
-there's no risk of the model picking a leaf/category pair that don't match.
+`topics` is stored at leaf granularity. `event_type` is not: the model is
+still prompted with (and picks) a specific leaf (e.g. `"Lecture"`), since
+that gives it a more concrete cue to reason from, but `tagging.py`'s
+`_validate_event_type` immediately collapses that leaf to its parent
+category (e.g. `"Lecture"` → `"Academic / Research"`, `"Commencement"` →
+`"Ceremony / Tradition"`) before it's ever written onto the `Event` —
+fine-grained event types turned out to be more depth than this needs.
+
+The model never outputs a parent category directly for `topics` — `tagging.py`
+derives it from the leaf via the taxonomy dict, so there's no risk of the
+model picking a leaf/category pair that don't match. (Same idea for
+`postgre_io.py`'s bitflag encoding of `topics`: it looks up each leaf's
+category and bit position via `schema.py`, never trusts the model to name
+a category directly.)
 
 ## Topic taxonomy
 
@@ -74,7 +86,7 @@ there's no risk of the model picking a leaf/category pair that don't match.
 One DeepSeek API call per event (no batching), `temperature=0`,
 `response_format={"type": "json_object"}`.
 
-**System prompt** (taxonomy blocks are generated from the `tagging.py`
+**System prompt** (taxonomy blocks are generated from the `schema.py`
 dicts, one `"- Category: leaf, leaf, ..."` line per category):
 
 ```
@@ -113,21 +125,37 @@ The model's raw output is never trusted as-is:
 - Each returned `topics` entry is matched case-insensitively against the
   full set of topic leaves; non-matching entries are dropped. If nothing
   survives, `topics` falls back to `["Other / Uncategorized"]`.
-- `event_type` is matched the same way; if it doesn't match, it falls back
-  to `"Other"`.
+- `event_type` is matched case-insensitively against the full set of
+  event-type *leaves*, then replaced with that leaf's parent category. If
+  it doesn't match any leaf, it falls back to `"Other"` (which is both a
+  leaf and its own category, so the fallback needs no separate mapping).
 - Any request/parse failure (network error, malformed JSON, exhausted
   retries) falls back to the same `Other` values rather than dropping the
   event, so a bad API response never blocks tagging the rest of the batch.
 
 ## Cost notes
 
-Uses `deepseek-v4-flash` (DeepSeek's cheapest current model — plenty for a
-closed-taxonomy classification task; no need for the reasoning-heavy `-pro`
-tier). The system prompt (taxonomy + instructions) is a fixed prefix
-repeated on every call, which DeepSeek's API automatically prompt-caches —
-after the first call, that prefix is billed at the much cheaper cache-hit
-input rate on every subsequent event, so per-event cost is dominated by
-the short user prompt and the small JSON output.
+Uses `deepseek-v4-pro` — switched from `-flash` after early sample tagging
+runs on `-flash` came out noticeably worse (mislabeled/near-miss picks
+across the ~100-leaf taxonomy). `-pro` costs roughly 3x `-flash`, which is
+still cheap for this task. The system prompt (taxonomy + instructions) is
+a fixed prefix repeated on every call, which DeepSeek's API automatically
+prompt-caches — after the first call, that prefix is billed at the much
+cheaper cache-hit input rate on every subsequent event, so per-event cost
+is dominated by the short user prompt and the small JSON output.
+
+Events are also deduplicated by `event_id` before tagging (see below) —
+scraped feeds sometimes list the same event more than once, and there's
+no reason to pay for the same classification twice.
+
+## Deduplication
+
+`tag_events()` groups events by `event_id` before calling the API. Only
+the first event in each group is actually classified; its `topics` /
+`event_type` are then copied onto every other event sharing that id. This
+is transparent to callers — `tag_events()` still returns every event that
+was passed in, each with its tags filled in, just with fewer API calls
+made than events tagged.
 
 ## Required environment variable
 
