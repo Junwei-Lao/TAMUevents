@@ -504,4 +504,4 @@ def tag_sample_events(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    tag_sample_events()
+    tag_events()
