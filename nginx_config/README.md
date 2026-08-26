@@ -19,12 +19,25 @@ you use different ones):
 
 ```
 /var/www/tamuevent/
-├── frontend/dist/     <- `npm run build` output
-└── backend/           <- src/, requirements.txt, .venv/, .env
+├── frontend/           <- Vite project; frontend/dist/ is the built output nginx serves
+├── src/                <- FastAPI backend (src/helpers/backend.py)
+├── data/, docs/        <- rest of the repo, along for the ride
+├── requirements.txt
+├── .env
+└── .venv/              <- created fresh on the server, not copied from /mnt
 ```
+
+There's no separate `backend/` subfolder - this mirrors the repo root
+exactly (`src/`, `requirements.txt`, `.env` live at the top level, same as
+in `tamuevent_mobile_backend/`).
 
 Assumed OS: Debian/Ubuntu. Commands below use `apt`; substitute your
 distro's package manager if different.
+
+This guide assumes the project currently lives at `/mnt/TAMUevents` on the
+server (backend source plus an already-built `frontend/dist/`) and walks
+through moving it into `/var/www/tamuevent` - no `npm run build` on the
+server needed, since `dist/` is already built.
 
 ---
 
@@ -40,74 +53,84 @@ Whether the DNS record is proxied (orange cloud) or DNS-only (grey cloud)
 both work with the steps below; proxied is the normal choice since you're
 already using Cloudflare.
 
-## 1. Install Nginx, Certbot, and app runtimes
+## 1. Install Nginx, Certbot, and the Python runtime
+
+Node/npm isn't needed on the server - `frontend/dist/` is already built and
+just needs to be copied into place.
 
 ```bash
 sudo apt update
-sudo apt install -y nginx certbot python3 python3-venv postgresql-client curl
-
-# Node.js (build the frontend on the server) - or build locally and scp
-# the dist/ folder up instead, if you'd rather not install Node on the box.
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
+sudo apt install -y nginx certbot python3 python3-venv postgresql-client rsync
 ```
 
-## 2. Create the app user and directories
+## 2. Create the app user and target directories
 
 ```bash
 sudo useradd --system --home /var/www/tamuevent --shell /usr/sbin/nologin tamuevent
-sudo mkdir -p /var/www/tamuevent/frontend /var/www/tamuevent/backend /var/www/certbot
+sudo mkdir -p /var/www/tamuevent /var/www/certbot
+```
+
+## 3. Move the code from /mnt/TAMUevents into place
+
+This is a one-time move on the server itself (`/mnt` and `/var` are
+typically separate filesystems, so use `rsync` rather than `mv` - `mv`
+across filesystems silently falls back to a slow copy+delete anyway, and
+rsync gives you resumability and exclusions for free).
+
+`/mnt/TAMUevents` mirrors the repo root directly - `src/`,
+`requirements.txt`, `.env`, and `frontend/` all sit at the top level,
+there's no `backend/` subfolder. One rsync brings it all across, excluding
+the things that shouldn't move as-is:
+
+```bash
+sudo rsync -av \
+  --exclude .venv --exclude __pycache__ --exclude .pytest_cache \
+  --exclude frontend/node_modules \
+  /mnt/TAMUevents/ /var/www/tamuevent/
+```
+
+`frontend/dist/` (already built) and `.env` are both plain files under
+that tree, so they come along automatically. Lock down `.env`'s
+permissions and recreate the venv fresh at the new path - a venv's scripts
+hardcode their own location (e.g. the `.venv/bin/uvicorn` shebang would
+still point at `/mnt/TAMUevents/.venv`), so copying it verbatim breaks it:
+
+```bash
+sudo chmod 600 /var/www/tamuevent/.env
+
+cd /var/www/tamuevent
+sudo python3 -m venv .venv
+sudo .venv/bin/pip install -r requirements.txt
+```
+
+If `frontend/dist/` was built with the dev default (`VITE_API_BASE_URL`
+unset or pointing at `http://localhost:9191/api`), the deployed site will
+try to call `localhost` from the visitor's browser and fail. Check what's
+baked in:
+
+```bash
+grep -o 'localhost:9191[^"]*' /var/www/tamuevent/frontend/dist/assets/*.js
+```
+
+If that matches, the build needs to be redone with
+`VITE_API_BASE_URL=/api npm run build` (on any machine with Node - your
+laptop is fine) and the corrected `dist/` copied up instead, since Vite
+bakes `VITE_*` values into the JS at build time, not at serve time.
+
+**Ownership**, once everything is in place:
+
+```bash
 sudo chown -R tamuevent:tamuevent /var/www/tamuevent
 ```
 
-## 3. Deploy the code
+(If this doesn't stick - files stay owned by whoever ran `rsync` - check
+`mount | grep /var` and `mount | grep /mnt`: it usually means one side is a
+filesystem, like NTFS via `ntfs-3g` or a network share, that doesn't support
+per-file Unix ownership.)
 
-From your machine (or directly on the server via `git clone`):
-
-```bash
-# Backend: copy the whole repo minus node_modules/dist, e.g.
-rsync -av --exclude node_modules --exclude frontend/dist ./ user@server:/tmp/tamuevent-src/
-ssh user@server "sudo rsync -av --exclude node_modules --exclude frontend/dist /tmp/tamuevent-src/ /var/www/tamuevent/backend/"
-```
-
-Then on the server:
-
-```bash
-cd /var/www/tamuevent/backend
-sudo -u tamuevent python3 -m venv .venv
-sudo -u tamuevent .venv/bin/pip install -r requirements.txt
-
-# Copy your local .env (DEEPSEEK_API_KEY, db_username, db_password) up
-# separately - it's gitignored on purpose, don't put secrets through git.
-```
-
-Copy `.env` up with `scp` (not through the rsync above, and never through
-git):
-
-```bash
-scp .env user@server:/tmp/tamuevent.env
-ssh user@server "sudo mv /tmp/tamuevent.env /var/www/tamuevent/backend/.env && \
-  sudo chown tamuevent:tamuevent /var/www/tamuevent/backend/.env && \
-  sudo chmod 600 /var/www/tamuevent/backend/.env"
-```
-
-Build the frontend for production. It needs `VITE_API_BASE_URL=/api`
-(same-origin, since Nginx proxies `/api/` on this domain) rather than the
-`http://localhost:9191/api` in your local `frontend/.env`, which is dev-only:
-
-```bash
-cd frontend
-VITE_API_BASE_URL=/api npm ci
-VITE_API_BASE_URL=/api npm run build
-```
-
-Then deploy the output:
-
-```bash
-rsync -av dist/ user@server:/tmp/tamuevent-dist/
-ssh user@server "sudo rsync -av --delete /tmp/tamuevent-dist/ /var/www/tamuevent/frontend/dist/ && \
-  sudo chown -R tamuevent:tamuevent /var/www/tamuevent/frontend/dist"
-```
+Once you've confirmed the app works from `/var/www/tamuevent` (step 8
+below), the `/mnt/TAMUevents` copy is redundant - remove it whenever you're
+comfortable, there's no rush.
 
 ## 4. Get the Let's Encrypt certificate
 
@@ -195,10 +218,13 @@ sudo ufw enable
 
 ## Redeploying later
 
-- Frontend change: rebuild (`VITE_API_BASE_URL=/api npm run build`), rsync
-  `dist/` up again, no Nginx/backend restart needed.
-- Backend change: rsync the updated `src/`, then
-  `sudo systemctl restart tamuevent-backend`.
+- Frontend change: rebuild locally (`VITE_API_BASE_URL=/api npm run
+  build`), rsync the new `dist/` to `/var/www/tamuevent/frontend/dist/`
+  (`--delete` so removed files don't linger), `sudo chown -R
+  tamuevent:tamuevent /var/www/tamuevent/frontend/dist`. No Nginx/backend
+  restart needed.
+- Backend change: rsync the updated `src/` into `/var/www/tamuevent/src/`,
+  then `sudo systemctl restart tamuevent-backend`.
 - Nginx config change: edit the file in this repo, `scp`/rsync it to
   `/etc/nginx/sites-available/tamuevent.com.conf`, then
   `sudo nginx -t && sudo systemctl reload nginx`.

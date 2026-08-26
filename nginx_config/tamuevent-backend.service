@@ -7,7 +7,9 @@
 #          sudo systemctl enable --now tamuevent-backend
 #
 # Adjust User/WorkingDirectory/paths if you deploy somewhere other than
-# /var/www/tamuevent/backend (see nginx_config/README.md).
+# /var/www/tamuevent (see nginx_config/README.md). Note there's no separate
+# "backend" subfolder - src/, requirements.txt, .env, and .venv/ all sit
+# directly under the project root, same as in the repo.
 
 [Unit]
 Description=TAMU Events FastAPI backend (uvicorn)
@@ -18,9 +20,9 @@ Wants=postgresql.service
 Type=simple
 User=tamuevent
 Group=tamuevent
-WorkingDirectory=/var/www/tamuevent/backend/src/helpers
-EnvironmentFile=/var/www/tamuevent/backend/.env
-ExecStart=/var/www/tamuevent/backend/.venv/bin/uvicorn backend:app --host 127.0.0.1 --port 9191 --workers 2
+WorkingDirectory=/var/www/tamuevent/src/helpers
+EnvironmentFile=/var/www/tamuevent/.env
+ExecStart=/var/www/tamuevent/.venv/bin/uvicorn backend:app --host 127.0.0.1 --port 9191 --workers 2
 Restart=on-failure
 RestartSec=5
 
