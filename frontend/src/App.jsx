@@ -5,6 +5,8 @@ import EventList from "./components/EventList.jsx";
 import Footer from "./components/Footer.jsx";
 import { searchEvents } from "./api.js";
 import { DEFAULT_FILTERS } from "./filterOptions.js";
+import { dedupeEventsById, excludeBlacklistedEvents } from "./eventFilters.js";
+import { EVENT_NAME_BLACKLIST } from "./eventNameBlacklist.js";
 
 function toIsoDate(date) {
   const year = date.getFullYear();
@@ -63,7 +65,8 @@ export default function App() {
       const results = await searchEvents(
         buildRequestBody(pendingRange, pendingFilters)
       );
-      setEvents(results);
+      const deduped = dedupeEventsById(results);
+      setEvents(excludeBlacklistedEvents(deduped, EVENT_NAME_BLACKLIST));
       setIsDrawerOpen(false);
     } catch (err) {
       setError(err.message || "Something went wrong while loading events.");

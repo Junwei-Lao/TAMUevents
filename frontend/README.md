@@ -102,3 +102,13 @@ Each item is the JSON form of the `Event` dataclass in
 - Results are grouped day-by-day (using `start_date`) with a header per day,
   each event shown as a card with title, date, and description. Clicking a
   card opens `event.url` in a new tab.
+- Before display, results go through two frontend-only cleanup passes
+  (`src/eventFilters.js`, applied in `App.jsx`'s `applyFilter`):
+  - **Dedupe by id** - the backend can return multiple rows sharing one
+    `event_id` (e.g. a recurring event's separate occurrences all carry the
+    same id - see `postgre_io.py`'s docstring on why its real identity key
+    is `(event_id, date, date_time)`, not `event_id` alone). Only the first
+    occurrence per id is kept.
+  - **Name blacklist** - events whose title exactly matches (case-insensitive)
+    an entry in `src/eventNameBlacklist.js`'s `EVENT_NAME_BLACKLIST` are
+    dropped. This is a frontend-only exclusion (no backend change)
