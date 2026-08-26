@@ -18,8 +18,8 @@ Wants=postgresql.service
 
 [Service]
 Type=simple
-User=tamuevent
-Group=tamuevent
+User=debian
+Group=debian
 WorkingDirectory=/var/www/tamuevent/src/helpers
 EnvironmentFile=/var/www/tamuevent/.env
 ExecStart=/var/www/tamuevent/.venv/bin/uvicorn backend:app --host 127.0.0.1 --port 9191 --workers 2

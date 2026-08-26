@@ -35,9 +35,8 @@ Assumed OS: Debian/Ubuntu. Commands below use `apt`; substitute your
 distro's package manager if different.
 
 This guide assumes the project currently lives at `/mnt/TAMUevents` on the
-server (backend source plus an already-built `frontend/dist/`) and walks
-through moving it into `/var/www/tamuevent` - no `npm run build` on the
-server needed, since `dist/` is already built.
+server and walks through moving it into `/var/www/tamuevent`, building the
+frontend there with the Node/npm you've already installed on the server.
 
 ---
 
@@ -55,18 +54,25 @@ already using Cloudflare.
 
 ## 1. Install Nginx, Certbot, and the Python runtime
 
-Node/npm isn't needed on the server - `frontend/dist/` is already built and
-just needs to be copied into place.
+(Node/npm are assumed already installed, since the frontend gets built on
+the server in step 3.)
 
 ```bash
 sudo apt update
 sudo apt install -y nginx certbot python3 python3-venv postgresql-client rsync
 ```
 
-## 2. Create the app user and target directories
+## 2. Create the target directory
+
+Running the service as your existing `debian` login (rather than a
+dedicated system account) - confirm its primary group is also `debian`
+before relying on the chown commands below:
 
 ```bash
-sudo useradd --system --home /var/www/tamuevent --shell /usr/sbin/nologin tamuevent
+id debian   # expect: uid=...(debian) gid=...(debian) ...
+```
+
+```bash
 sudo mkdir -p /var/www/tamuevent /var/www/certbot
 ```
 
@@ -85,42 +91,48 @@ the things that shouldn't move as-is:
 ```bash
 sudo rsync -av \
   --exclude .venv --exclude __pycache__ --exclude .pytest_cache \
-  --exclude frontend/node_modules \
+  --exclude frontend/node_modules --exclude frontend/dist \
   /mnt/TAMUevents/ /var/www/tamuevent/
 ```
 
-`frontend/dist/` (already built) and `.env` are both plain files under
-that tree, so they come along automatically. Lock down `.env`'s
-permissions and recreate the venv fresh at the new path - a venv's scripts
+(`frontend/dist/` and `node_modules/` are excluded since both get
+(re)built fresh on the server below, not copied across.) `.env` is a plain
+file under the tree, so it comes along automatically - lock down its
+permissions:
+
+```bash
+sudo chmod 600 /var/www/tamuevent/.env
+```
+
+Recreate the backend venv fresh at the new path - a venv's scripts
 hardcode their own location (e.g. the `.venv/bin/uvicorn` shebang would
 still point at `/mnt/TAMUevents/.venv`), so copying it verbatim breaks it:
 
 ```bash
-sudo chmod 600 /var/www/tamuevent/.env
-
 cd /var/www/tamuevent
 sudo python3 -m venv .venv
 sudo .venv/bin/pip install -r requirements.txt
 ```
 
-If `frontend/dist/` was built with the dev default (`VITE_API_BASE_URL`
-unset or pointing at `http://localhost:9191/api`), the deployed site will
-try to call `localhost` from the visitor's browser and fail. Check what's
-baked in:
+Build the frontend. It needs `VITE_API_BASE_URL=/api` (same-origin, since
+Nginx proxies `/api/` on this domain) rather than the
+`http://localhost:9191/api` in `frontend/.env`, which is dev-only - Vite
+bakes `VITE_*` values into the JS at build time, so this has to be set for
+the build itself, not just at runtime:
 
 ```bash
-grep -o 'localhost:9191[^"]*' /var/www/tamuevent/frontend/dist/assets/*.js
+cd /var/www/tamuevent/frontend
+sudo npm ci
+sudo VITE_API_BASE_URL=/api npm run build
 ```
 
-If that matches, the build needs to be redone with
-`VITE_API_BASE_URL=/api npm run build` (on any machine with Node - your
-laptop is fine) and the corrected `dist/` copied up instead, since Vite
-bakes `VITE_*` values into the JS at build time, not at serve time.
+This produces `/var/www/tamuevent/frontend/dist/`, which is what
+`tamuevent.com.conf`'s `root` points at.
 
 **Ownership**, once everything is in place:
 
 ```bash
-sudo chown -R tamuevent:tamuevent /var/www/tamuevent
+sudo chown -R debian:debian /var/www/tamuevent
 ```
 
 (If this doesn't stick - files stay owned by whoever ran `rsync` - check
@@ -218,11 +230,12 @@ sudo ufw enable
 
 ## Redeploying later
 
-- Frontend change: rebuild locally (`VITE_API_BASE_URL=/api npm run
-  build`), rsync the new `dist/` to `/var/www/tamuevent/frontend/dist/`
-  (`--delete` so removed files don't linger), `sudo chown -R
-  tamuevent:tamuevent /var/www/tamuevent/frontend/dist`. No Nginx/backend
-  restart needed.
+- Frontend change: get the updated `frontend/` source onto the server
+  (rsync it into `/var/www/tamuevent/frontend/`, excluding
+  `node_modules`/`dist`), then rebuild in place:
+  `cd /var/www/tamuevent/frontend && sudo VITE_API_BASE_URL=/api npm run
+  build && sudo chown -R debian:debian dist`. No Nginx/backend restart
+  needed.
 - Backend change: rsync the updated `src/` into `/var/www/tamuevent/src/`,
   then `sudo systemctl restart tamuevent-backend`.
 - Nginx config change: edit the file in this repo, `scp`/rsync it to

@@ -4,5 +4,6 @@ python-dotenv
 python-dateutil
 psycopg2-binary
 fastapi
+pydantic
 uvicorn
 apscheduler
