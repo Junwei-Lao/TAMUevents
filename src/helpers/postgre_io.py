@@ -359,7 +359,7 @@ def create_tables(conn) -> None:
                 PRIMARY KEY (source, event_id, date, date_time),
                 FOREIGN KEY (source, event_id, date, date_time)
                     REFERENCES events_before_tagging (source, event_id, date, date_time)
-                    ON DELETE CASCADE
+                    ON DELETE CASCADE ON UPDATE CASCADE
             )
             """
         )
@@ -479,13 +479,74 @@ def patch_add_source_column(conn=None) -> None:
                 "ALTER TABLE events_after_tagging "
                 "ADD FOREIGN KEY (source, event_id, date, date_time) "
                 "REFERENCES events_before_tagging (source, event_id, date, date_time) "
-                "ON DELETE CASCADE"
+                "ON DELETE CASCADE ON UPDATE CASCADE"
             )
         conn.commit()
         logger.info(
             "patch_add_source_column: added 'source' column (defaulted to %d) and widened "
             "the identity key to (source, event_id, date, date_time)",
             DEFAULT_SOURCE,
+        )
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def patch_add_fk_update_cascade(conn=None) -> None:
+    """One-off migration for a database whose events_after_tagging FK was
+    created (by create_tables or patch_add_source_column) before
+    ON UPDATE CASCADE was added to it: drops and recreates that FK with
+    ON UPDATE CASCADE, so updating an existing row's date/date_time -
+    part of events_before_tagging's PRIMARY KEY - automatically carries
+    the matching events_after_tagging row's key along with it instead of
+    raising a foreign key violation.
+
+    This is what makes update_event_schedule's plain UPDATE work: without
+    it, changing date/date_time on a row with an already-tagged
+    events_after_tagging counterpart would be rejected, since the old PK
+    value the child row references would disappear out from under it.
+
+    Safe to run repeatedly: checks the FK's current update_rule first and
+    no-ops if it's already CASCADE. create_tables already creates fresh
+    databases with this schema, so this is only needed against a database
+    set up before this cascade existed.
+    """
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT rc.update_rule
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.referential_constraints rc
+                    ON tc.constraint_name = rc.constraint_name
+                WHERE tc.table_name = 'events_after_tagging' AND tc.constraint_type = 'FOREIGN KEY'
+                """
+            )
+            row = cur.fetchone()
+
+        if row is not None and row[0] == "CASCADE":
+            logger.info("patch_add_fk_update_cascade: already applied, nothing to do")
+            return
+
+        after_fk = _get_constraint_name(conn, "events_after_tagging", "FOREIGN KEY")
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("ALTER TABLE events_after_tagging DROP CONSTRAINT {}").format(
+                    sql.Identifier(after_fk)
+                )
+            )
+            cur.execute(
+                "ALTER TABLE events_after_tagging "
+                "ADD FOREIGN KEY (source, event_id, date, date_time) "
+                "REFERENCES events_before_tagging (source, event_id, date, date_time) "
+                "ON DELETE CASCADE ON UPDATE CASCADE"
+            )
+        conn.commit()
+        logger.info(
+            "patch_add_fk_update_cascade: events_after_tagging's FK now cascades "
+            "date/date_time (PK) updates from events_before_tagging"
         )
     finally:
         if owns_conn:
@@ -644,6 +705,52 @@ def update_is_canceled(conn, changes: Sequence[Tuple[int, int, str, str, str]]) 
         )
     conn.commit()
     logger.info("Updated is_canceled on %d event(s)", len(changes))
+
+
+def update_event_schedule(
+    conn, changes: Sequence[Tuple[int, int, str, str, str, str, str]]
+) -> None:
+    """Update an existing event's date/date_time (plus the start_date/
+    end_date columns parsed from it, and is_canceled while at it) in place,
+    given `changes` as (source, event_id, old_date, old_date_time,
+    new_date, new_date_time, new_is_canceled) tuples - i.e. "the event
+    previously at this key is now scheduled at this other date/time".
+
+    Only safe to use for sources whose event_id is a stable identifier for
+    one real event across reschedules - e.g. TAMU ERS, whose ScheduleId is
+    never reused across occurrences (see schema.py's "Event sources"
+    docstring and tagging.py's tag_all_ers_events notes) - NOT the TAMU
+    calendar source, which legitimately reuses the same event_id across
+    multiple simultaneous recurring occurrences differentiated only by
+    date/date_time; matching those by (source, event_id) alone and
+    "updating" one onto another would silently collapse distinct events.
+
+    date/date_time are part of events_before_tagging's PRIMARY KEY, so this
+    relies on the events_after_tagging foreign key having ON UPDATE CASCADE
+    (patch_add_fk_update_cascade) to carry the matching tagged row's key
+    along automatically, preserving its topics/event_type untouched - a
+    reschedule alone doesn't need re-tagging.
+    """
+    if not changes:
+        return
+    rows = []
+    for source, event_id, old_date, old_date_time, new_date, new_date_time, is_canceled in changes:
+        start_date, end_date = parse_event_date_range(new_date)
+        rows.append((
+            new_date, new_date_time, start_date, end_date, is_canceled,
+            source, event_id, old_date, old_date_time,
+        ))
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            UPDATE events_before_tagging
+            SET date = %s, date_time = %s, start_date = %s, end_date = %s, is_canceled = %s
+            WHERE source = %s AND event_id = %s AND date = %s AND date_time = %s
+            """,
+            rows,
+        )
+    conn.commit()
+    logger.info("Updated schedule (date/date_time) on %d event(s)", len(changes))
 
 
 def backfill_audiences(conn=None) -> int:
