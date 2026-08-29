@@ -90,7 +90,7 @@ the things that shouldn't move as-is:
 
 ```bash
 sudo rsync -av \
-  --exclude .venv --exclude __pycache__ --exclude .pytest_cache \
+  --exclude .venv --exclude venv --exclude __pycache__ --exclude .pytest_cache \
   --exclude frontend/node_modules --exclude frontend/dist \
   /mnt/TAMUevents/ /var/www/tamuevent/
 ```
