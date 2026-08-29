@@ -6,14 +6,15 @@ scheduled for 2am America/Chicago (DST-aware, via APScheduler's CronTrigger)
 - that keeps the database in sync with the live TAMU calendar without
 redoing work that's already done:
 
-  1. Snapshot the DB's current (event_id, date, date_time) -> is_canceled
-     state (postgre_io.get_event_cancellation_status) - cheap, one query.
+  1. Snapshot the DB's current (source, event_id, date, date_time) ->
+     is_canceled state (postgre_io.get_event_cancellation_status) - cheap,
+     one query.
   2. Re-scrape every calendar feed (fetch_events.fetch_all_events(force=True)
      bypasses the usual per-feed revisit-days cadence, since this only runs
      once a day and needs a fresh look at every event's current
      cancellation status, not just feeds that happen to be "due").
-  3. Diff each freshly-scraped event's (event_id, date, date_time) identity
-     against that snapshot:
+  3. Diff each freshly-scraped event's (source, event_id, date, date_time)
+     identity against that snapshot:
        - key absent -> a brand new event: tag it (tagging.tag_events) and
          upsert it (postgre_io.upsert_events).
        - key present, is_canceled differs -> an existing event whose
@@ -68,17 +69,19 @@ def refresh_events() -> None:
         logger.info("Re-fetched %d event(s) from the live calendar", len(fresh_events))
 
         new_events: List[Event] = []
-        cancellation_changes: List[Tuple[int, str, str, str]] = []
+        cancellation_changes: List[Tuple[int, int, str, str, str]] = []
 
         for event in fresh_events:
-            key = (event.event_id, event.date, event.date_time)
+            key = (event.source, event.event_id, event.date, event.date_time)
             previous_is_canceled = previous_status.get(key)
             is_canceled = event.is_canceled or ""
 
             if previous_is_canceled is None:
                 new_events.append(event)
             elif previous_is_canceled != is_canceled:
-                cancellation_changes.append((event.event_id, event.date, event.date_time, is_canceled))
+                cancellation_changes.append(
+                    (event.source, event.event_id, event.date, event.date_time, is_canceled)
+                )
             # else: same id, same is_canceled - nothing changed, skip it.
 
         if cancellation_changes:
@@ -95,6 +98,14 @@ def refresh_events() -> None:
             len(cancellation_changes),
             len(fresh_events) - len(new_events) - len(cancellation_changes),
         )
+
+        print(
+            "Nightly event refresh complete: %d new, %d cancellation update(s), %d unchanged",
+            len(new_events),
+            len(cancellation_changes),
+            len(fresh_events) - len(new_events) - len(cancellation_changes)
+        )
+        
     except Exception:
         logger.exception("Nightly event refresh failed")
     finally:

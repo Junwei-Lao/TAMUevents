@@ -27,7 +27,7 @@ function toCalendarEvents(events) {
     }));
 }
 
-function EventCell({ event, onDeleteById, onDeleteByName }) {
+function EventCell({ event, onDeleteByUrl, onDeleteByName }) {
   const original = event.resource;
   const openEvent = () => window.open(original.url, "_blank", "noopener,noreferrer");
 
@@ -44,7 +44,7 @@ function EventCell({ event, onDeleteById, onDeleteByName }) {
       </span>
       <EventActions
         event={original}
-        onDeleteById={onDeleteById}
+        onDeleteByUrl={onDeleteByUrl}
         onDeleteByName={onDeleteByName}
         compact
       />
@@ -54,7 +54,7 @@ function EventCell({ event, onDeleteById, onDeleteByName }) {
 
 export default function EventCalendar({
   events,
-  onDeleteById,
+  onDeleteByUrl,
   onDeleteByName,
   focusDate,
   onFocusDateChange,
@@ -64,10 +64,10 @@ export default function EventCalendar({
   const components = useMemo(
     () => ({
       event: (props) => (
-        <EventCell {...props} onDeleteById={onDeleteById} onDeleteByName={onDeleteByName} />
+        <EventCell {...props} onDeleteByUrl={onDeleteByUrl} onDeleteByName={onDeleteByName} />
       ),
     }),
-    [onDeleteById, onDeleteByName]
+    [onDeleteByUrl, onDeleteByName]
   );
 
   return (

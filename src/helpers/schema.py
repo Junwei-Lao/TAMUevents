@@ -36,17 +36,45 @@ position - `encode_topic_flags`/`decode_topic_flags` convert between the
 same `{category: [leaf, ...]}` shape as `Event.topics` and
 `{category_column_name: bitmask}`. Storing multiple topics under the same
 category is then just OR-ing their bits.
+
+Event sources
+-------------
+`Event.source` identifies which website an event was scraped from, as a
+small ascending int assigned in the order sources were added - `0` for the
+first (TAMU's calendar, the only one that exists today), `1` for the
+second once there is one, and so on. `SOURCES` is the registry mapping
+each id to a human-readable label; extend it (never renumber it) every
+time a new source is added.
+
+This exists because `event_id` is only guaranteed unique *within* one
+source - two different calendar systems could each hand out an
+`event_id=372167` for two unrelated events. postgre_io.py accounts for
+this by making `source` part of the same identity key `event_id` already
+participates in (see fetch_events._merge_events / postgre_io.py's module
+docstring): `(source, event_id, date, date_time)`, not just `(event_id,
+date, date_time)` - so two sources' events can never collide, and
+`patch_add_source_column` is the one-off migration that widens an
+already-populated database's PRIMARY KEY/FOREIGN KEY to match.
 """
 
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+# Ascending id per scraped website, in the order each was added - see this
+# module's "Event sources" docstring section above. Extend this dict (never
+# renumber existing entries) whenever a new source is added.
+DEFAULT_SOURCE = 0
+SOURCES: Dict[int, str] = {
+    DEFAULT_SOURCE: "TAMU Calendar",
+    1: "TAMU ERS",
+}
+
 
 @dataclass
 class Event:
-    """A fully-parsed TAMU calendar event, combining the feed listing entry
-    with the fields pulled from its event-detail JSON."""
+    """A fully-parsed calendar event, combining the feed listing entry with
+    the fields pulled from its event-detail JSON."""
 
     event_id: int
     group_title: str
@@ -61,6 +89,7 @@ class Event:
     is_canceled: str = ""  # "" (or absent) means not canceled
     topics: Dict[str, List[str]] = field(default_factory=dict)  # {category: [leaf, ...]}, filled in by tagging.py
     event_type: str = ""  # filled in by tagging.py
+    source: int = DEFAULT_SOURCE  # which scraped website this came from - see SOURCES
 
 
 @dataclass

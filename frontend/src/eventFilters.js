@@ -1,16 +1,19 @@
 // Frontend-only cleanup of the backend's raw search results.
 
-// The backend can return multiple rows for the same event_id (e.g. a
-// recurring event with several occurrences all sharing one id - see
-// postgre_io.py's docstring on why (event_id, date, date_time) rather than
-// event_id alone is the real identity). For the main page we only want one
-// card per id, so keep just the first occurrence in result order.
-export function dedupeEventsById(events) {
+// The backend can return multiple rows for what's really the same event -
+// not just repeated event_ids (see postgre_io.py's docstring on why
+// (event_id, date, date_time) rather than event_id alone is the real
+// identity for a single scraped listing), but also distinct event_ids that
+// point at the same event.url (the same event scraped/listed more than
+// once under different ids). event_id isn't a reliable identity for
+// display purposes either way, so dedupe on url instead - for the main
+// page we only want one card per url, keeping the first occurrence.
+export function dedupeEventsByUrl(events) {
   const seen = new Set();
   const deduped = [];
   for (const event of events) {
-    if (seen.has(event.event_id)) continue;
-    seen.add(event.event_id);
+    if (seen.has(event.url)) continue;
+    seen.add(event.url);
     deduped.push(event);
   }
   return deduped;

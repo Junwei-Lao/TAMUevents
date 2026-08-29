@@ -9,11 +9,17 @@ Two tables, split along the same line as the pipeline itself:
 - `events_after_tagging` holds only what `tagging.py` adds (`topics`,
   `event_type`), one row per event, FK'd back to the first table.
 
-Both tables key on `(event_id, date, date_time)`, not `event_id` alone -
-`fetch_events._merge_events` already treats that triple as an event's real
-identity (recurring events reuse the same `event_id` across occurrences),
-so the DB's primary key mirrors it to avoid silently collapsing distinct
-occurrences into one row.
+Both tables key on `(source, event_id, date, date_time)`, not `event_id`
+alone - `fetch_events._merge_events` already treats `(event_id, date,
+date_time)` as an event's real identity within one source (recurring
+events reuse the same `event_id` across occurrences), so the DB's primary
+key mirrors that, prefixed with `source` (see schema.py's "Event sources"
+docstring section) since `event_id` is only unique *within* one scraped
+website - two different sources could hand out the same `event_id` for
+unrelated events. `patch_add_source_column` is the one-off migration that
+adds `source` (defaulting existing rows to 0) and widens the
+PRIMARY KEY/FOREIGN KEY to include it on a database created before this
+column existed.
 
 `categories` and `categories_audience` are scraped free text, but in
 practice TAMU's calendar draws them from a small, fairly fixed set (see
@@ -68,6 +74,7 @@ from psycopg2.extras import execute_values, RealDictCursor
 from dotenv import load_dotenv
 
 from schema import (
+    DEFAULT_SOURCE,
     TOPIC_CATEGORY_COLUMNS,
     TOPIC_LEAF_TO_CATEGORY,
     decode_topic_flags,
@@ -301,6 +308,7 @@ def create_tables(conn) -> None:
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS events_before_tagging (
+                source INTEGER NOT NULL DEFAULT 0,
                 event_id BIGINT NOT NULL,
                 date TEXT NOT NULL DEFAULT '',
                 date_time TEXT NOT NULL DEFAULT '',
@@ -314,7 +322,7 @@ def create_tables(conn) -> None:
                 categories TEXT[] NOT NULL DEFAULT '{}',
                 categories_audience TEXT[] NOT NULL DEFAULT '{}',
                 is_canceled TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (event_id, date, date_time)
+                PRIMARY KEY (source, event_id, date, date_time)
             )
             """
         )
@@ -324,14 +332,15 @@ def create_tables(conn) -> None:
         cur.execute(
             f"""
             CREATE TABLE IF NOT EXISTS events_after_tagging (
+                source INTEGER NOT NULL DEFAULT 0,
                 event_id BIGINT NOT NULL,
                 date TEXT NOT NULL DEFAULT '',
                 date_time TEXT NOT NULL DEFAULT '',
                 {topic_flag_columns},
                 event_type TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (event_id, date, date_time),
-                FOREIGN KEY (event_id, date, date_time)
-                    REFERENCES events_before_tagging (event_id, date, date_time)
+                PRIMARY KEY (source, event_id, date, date_time),
+                FOREIGN KEY (source, event_id, date, date_time)
+                    REFERENCES events_before_tagging (source, event_id, date, date_time)
                     ON DELETE CASCADE
             )
             """
@@ -353,6 +362,116 @@ def create_tables(conn) -> None:
             "ON events_after_tagging (event_type)"
         )
     conn.commit()
+
+
+def _get_constraint_name(conn, table: str, constraint_type: str) -> str:
+    """Look up the (auto-generated) name Postgres gave a constraint on
+    `table`, rather than guessing its naming convention - used by
+    patch_add_source_column so it can drop the old PRIMARY KEY/FOREIGN KEY
+    before adding the widened one."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT constraint_name FROM information_schema.table_constraints
+            WHERE table_name = %s AND constraint_type = %s
+            """,
+            (table, constraint_type),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise RuntimeError(f"No {constraint_type} constraint found on {table!r}")
+    return row[0]
+
+
+def patch_add_source_column(conn=None) -> None:
+    """One-off migration for a database created before the `source` column
+    existed (see schema.py's "Event sources" docstring section): adds
+    `source INTEGER NOT NULL DEFAULT 0` to both tables - Postgres backfills
+    every existing row to 0 as part of adding the column, satisfying "the
+    current events are source 0" without a separate UPDATE - and widens
+    the PRIMARY KEY/FOREIGN KEY from (event_id, date, date_time) to
+    (source, event_id, date, date_time), since event_id is only unique
+    *within* one source.
+
+    Safe to run repeatedly: `ADD COLUMN IF NOT EXISTS` and the "does the
+    column already exist" check below make every step a no-op once the
+    patch has already been applied.
+
+    create_tables already creates fresh databases with this schema, so
+    this function is only needed against a database that was set up
+    before this column existed - like an already-populated deployment.
+    """
+    owns_conn = conn is None
+    conn = conn or connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'events_before_tagging' AND column_name = 'source'
+                """
+            )
+            already_patched = cur.fetchone() is not None
+
+        if already_patched:
+            logger.info("patch_add_source_column: already applied, nothing to do")
+            return
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE events_before_tagging ADD COLUMN source INTEGER NOT NULL DEFAULT %s",
+                (DEFAULT_SOURCE,),
+            )
+            cur.execute(
+                "ALTER TABLE events_after_tagging ADD COLUMN source INTEGER NOT NULL DEFAULT %s",
+                (DEFAULT_SOURCE,),
+            )
+
+        before_pk = _get_constraint_name(conn, "events_before_tagging", "PRIMARY KEY")
+        after_pk = _get_constraint_name(conn, "events_after_tagging", "PRIMARY KEY")
+        after_fk = _get_constraint_name(conn, "events_after_tagging", "FOREIGN KEY")
+
+        with conn.cursor() as cur:
+            # FK first - it depends on events_before_tagging's PK.
+            cur.execute(
+                sql.SQL("ALTER TABLE events_after_tagging DROP CONSTRAINT {}").format(
+                    sql.Identifier(after_fk)
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE events_before_tagging DROP CONSTRAINT {}").format(
+                    sql.Identifier(before_pk)
+                )
+            )
+            cur.execute(
+                sql.SQL("ALTER TABLE events_after_tagging DROP CONSTRAINT {}").format(
+                    sql.Identifier(after_pk)
+                )
+            )
+
+            cur.execute(
+                "ALTER TABLE events_before_tagging "
+                "ADD PRIMARY KEY (source, event_id, date, date_time)"
+            )
+            cur.execute(
+                "ALTER TABLE events_after_tagging "
+                "ADD PRIMARY KEY (source, event_id, date, date_time)"
+            )
+            cur.execute(
+                "ALTER TABLE events_after_tagging "
+                "ADD FOREIGN KEY (source, event_id, date, date_time) "
+                "REFERENCES events_before_tagging (source, event_id, date, date_time) "
+                "ON DELETE CASCADE"
+            )
+        conn.commit()
+        logger.info(
+            "patch_add_source_column: added 'source' column (defaulted to %d) and widened "
+            "the identity key to (source, event_id, date, date_time)",
+            DEFAULT_SOURCE,
+        )
+    finally:
+        if owns_conn:
+            conn.close()
 
 
 def populate_pools(conn, category_pool: Sequence[str], audience_pool: Sequence[str]) -> None:
@@ -378,11 +497,18 @@ def populate_pools(conn, category_pool: Sequence[str], audience_pool: Sequence[s
 def upsert_events(conn, events: Sequence[dict]) -> None:
     # A single multi-row INSERT ... ON CONFLICT DO UPDATE can't target the
     # same conflicting row twice in one statement, so collapse any
-    # duplicate (event_id, date, date_time) keys up front - last one wins,
-    # mirroring fetch_events._merge_events's "fresh data wins" behavior.
+    # duplicate (source, event_id, date, date_time) keys up front - last
+    # one wins, mirroring fetch_events._merge_events's "fresh data wins"
+    # behavior. source defaults to 0 (schema.DEFAULT_SOURCE) for events
+    # that predate the source field.
     deduped: Dict[Tuple, dict] = {}
     for e in events:
-        key = (e["event_id"], e.get("date") or "", e.get("date_time") or "")
+        key = (
+            e.get("source", DEFAULT_SOURCE),
+            e["event_id"],
+            e.get("date") or "",
+            e.get("date_time") or "",
+        )
         deduped[key] = e
     events = list(deduped.values())
 
@@ -392,6 +518,7 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
         start_date, end_date = parse_event_date_range(raw_date)
         before_rows.append(
             (
+                e.get("source", DEFAULT_SOURCE),
                 e["event_id"],
                 raw_date,
                 e.get("date_time") or "",
@@ -410,7 +537,12 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
     after_rows = []
     for e in events:
         flags = encode_topic_flags(e.get("topics") or {})
-        row = [e["event_id"], e.get("date") or "", e.get("date_time") or ""]
+        row = [
+            e.get("source", DEFAULT_SOURCE),
+            e["event_id"],
+            e.get("date") or "",
+            e.get("date_time") or "",
+        ]
         row.extend(flags.get(column, 0) for column in _TOPIC_COLUMNS)
         row.append(e.get("event_type") or "")
         after_rows.append(tuple(row))
@@ -420,10 +552,10 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
             cur,
             """
             INSERT INTO events_before_tagging
-                (event_id, date, date_time, start_date, end_date, group_title, url, title,
-                 description, location, categories, categories_audience, is_canceled)
+                (source, event_id, date, date_time, start_date, end_date, group_title, url,
+                 title, description, location, categories, categories_audience, is_canceled)
             VALUES %s
-            ON CONFLICT (event_id, date, date_time) DO UPDATE SET
+            ON CONFLICT (source, event_id, date, date_time) DO UPDATE SET
                 start_date = EXCLUDED.start_date,
                 end_date = EXCLUDED.end_date,
                 group_title = EXCLUDED.group_title,
@@ -437,7 +569,7 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
             """,
             before_rows,
         )
-        after_columns = ["event_id", "date", "date_time"] + _TOPIC_COLUMNS + ["event_type"]
+        after_columns = ["source", "event_id", "date", "date_time"] + _TOPIC_COLUMNS + ["event_type"]
         after_set_clause = ",\n                ".join(
             f"{column} = EXCLUDED.{column}" for column in _TOPIC_COLUMNS + ["event_type"]
         )
@@ -446,7 +578,7 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
             f"""
             INSERT INTO events_after_tagging ({", ".join(after_columns)})
             VALUES %s
-            ON CONFLICT (event_id, date, date_time) DO UPDATE SET
+            ON CONFLICT (source, event_id, date, date_time) DO UPDATE SET
                 {after_set_clause}
             """,
             after_rows,
@@ -455,40 +587,42 @@ def upsert_events(conn, events: Sequence[dict]) -> None:
     logger.info("Upserted %d events into events_before_tagging / events_after_tagging", len(events))
 
 
-def get_event_cancellation_status(conn=None) -> Dict[Tuple[int, str, str], str]:
-    """Return {(event_id, date, date_time): is_canceled} for every row
-    currently in events_before_tagging - the cheap snapshot the nightly
-    refresh job (main.py) diffs a fresh scrape against, so it can tell
-    "brand new event" (key absent) apart from "same event, cancellation
-    flipped" (key present, value differs) apart from "nothing changed"
-    (key present, value the same) without re-tagging or re-upserting
-    anything that hasn't actually changed."""
+def get_event_cancellation_status(conn=None) -> Dict[Tuple[int, int, str, str], str]:
+    """Return {(source, event_id, date, date_time): is_canceled} for every
+    row currently in events_before_tagging - the cheap snapshot the
+    nightly refresh job (main.py) diffs a fresh scrape against, so it can
+    tell "brand new event" (key absent) apart from "same event,
+    cancellation flipped" (key present, value differs) apart from "nothing
+    changed" (key present, value the same) without re-tagging or
+    re-upserting anything that hasn't actually changed."""
     owns_conn = conn is None
     conn = conn or connect()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT event_id, date, date_time, is_canceled FROM events_before_tagging")
-            return {(event_id, date_, date_time): is_canceled
-                     for event_id, date_, date_time, is_canceled in cur.fetchall()}
+            cur.execute(
+                "SELECT source, event_id, date, date_time, is_canceled FROM events_before_tagging"
+            )
+            return {(source, event_id, date_, date_time): is_canceled
+                     for source, event_id, date_, date_time, is_canceled in cur.fetchall()}
     finally:
         if owns_conn:
             conn.close()
 
 
-def update_is_canceled(conn, changes: Sequence[Tuple[int, str, str, str]]) -> None:
+def update_is_canceled(conn, changes: Sequence[Tuple[int, int, str, str, str]]) -> None:
     """Update just the is_canceled column on existing rows, given `changes`
-    as (event_id, date, date_time, new_is_canceled) tuples. Used by the
-    nightly refresh job for events whose identity (event_id, date,
-    date_time) is unchanged but whose cancellation status flipped - no need
-    to re-tag or touch anything else about the row for that."""
+    as (source, event_id, date, date_time, new_is_canceled) tuples. Used by
+    the nightly refresh job for events whose identity (source, event_id,
+    date, date_time) is unchanged but whose cancellation status flipped -
+    no need to re-tag or touch anything else about the row for that."""
     if not changes:
         return
     with conn.cursor() as cur:
         cur.executemany(
             "UPDATE events_before_tagging SET is_canceled = %s "
-            "WHERE event_id = %s AND date = %s AND date_time = %s",
-            [(is_canceled, event_id, date_, date_time)
-             for event_id, date_, date_time, is_canceled in changes],
+            "WHERE source = %s AND event_id = %s AND date = %s AND date_time = %s",
+            [(is_canceled, source, event_id, date_, date_time)
+             for source, event_id, date_, date_time, is_canceled in changes],
         )
     conn.commit()
     logger.info("Updated is_canceled on %d event(s)", len(changes))
@@ -512,7 +646,7 @@ def backfill_audiences(conn=None) -> int:
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT event_id, date, date_time, categories_audience "
+                "SELECT source, event_id, date, date_time, categories_audience "
                 "FROM events_before_tagging"
             )
             rows = cur.fetchall()
@@ -521,13 +655,15 @@ def backfill_audiences(conn=None) -> int:
         for row in rows:
             fixed = normalize_audience(row["categories_audience"])
             if fixed != (row["categories_audience"] or []):
-                changes.append((fixed, row["event_id"], row["date"], row["date_time"]))
+                changes.append(
+                    (fixed, row["source"], row["event_id"], row["date"], row["date_time"])
+                )
 
         if changes:
             with conn.cursor() as cur:
                 cur.executemany(
                     "UPDATE events_before_tagging SET categories_audience = %s "
-                    "WHERE event_id = %s AND date = %s AND date_time = %s",
+                    "WHERE source = %s AND event_id = %s AND date = %s AND date_time = %s",
                     changes,
                 )
                 cur.execute(
@@ -554,7 +690,8 @@ _JOINED_EVENT_SELECT = f"""
     SELECT b.*, {_AFTER_TOPIC_COLUMNS_SELECT}, a.event_type
     FROM events_after_tagging a
     JOIN events_before_tagging b
-        ON b.event_id = a.event_id
+        ON b.source = a.source
+        AND b.event_id = a.event_id
         AND b.date = a.date
         AND b.date_time = a.date_time
         AND b.is_canceled = ''
@@ -861,4 +998,4 @@ def initialize_database(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    print("No action yet")
+    patch_add_source_column()  # idempotent, so safe to run on a fresh database too

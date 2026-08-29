@@ -1,9 +1,9 @@
 import { useState } from "react";
 
 export default function DeletedEventsPanel({
-  deletedEventIds,
+  deletedEventUrls,
   deletedEventNames,
-  onRestoreById,
+  onRestoreByUrl,
   onRestoreByName,
   onBack,
 }) {
@@ -24,7 +24,7 @@ export default function DeletedEventsPanel({
           className={`deleted-tab ${tab === "byEvent" ? "deleted-tab--active" : ""}`}
           onClick={() => setTab("byEvent")}
         >
-          By Event ({deletedEventIds.length})
+          By Event ({deletedEventUrls.length})
         </button>
         <button
           type="button"
@@ -36,12 +36,12 @@ export default function DeletedEventsPanel({
       </div>
 
       {tab === "byEvent" ? (
-        deletedEventIds.length === 0 ? (
+        deletedEventUrls.length === 0 ? (
           <p className="deleted-empty">No individually removed events.</p>
         ) : (
           <ul className="deleted-list">
-            {deletedEventIds.map((entry) => (
-              <li key={entry.event_id} className="deleted-row">
+            {deletedEventUrls.map((entry) => (
+              <li key={entry.url} className="deleted-row">
                 <div className="deleted-row-info">
                   <span className="deleted-row-title">{entry.title}</span>
                   <span className="deleted-row-meta">{entry.date}</span>
@@ -49,7 +49,7 @@ export default function DeletedEventsPanel({
                 <button
                   type="button"
                   className="btn btn-secondary btn-small"
-                  onClick={() => onRestoreById(entry.event_id)}
+                  onClick={() => onRestoreByUrl(entry.url)}
                 >
                   Restore
                 </button>

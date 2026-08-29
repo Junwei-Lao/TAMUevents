@@ -105,11 +105,14 @@ Each item is the JSON form of the `Event` dataclass in
   card opens `event.url` in a new tab.
 - Before display, results go through two frontend-only cleanup passes
   (`src/eventFilters.js`, applied in `App.jsx`'s `applyFilter`):
-  - **Dedupe by id** - the backend can return multiple rows sharing one
-    `event_id` (e.g. a recurring event's separate occurrences all carry the
-    same id - see `postgre_io.py`'s docstring on why its real identity key
-    is `(event_id, date, date_time)`, not `event_id` alone). Only the first
-    occurrence per id is kept.
+  - **Dedupe by url** - the backend can return multiple rows for what's
+    really the same event: not just repeated `event_id`s (see
+    `postgre_io.py`'s docstring on why its real identity key is
+    `(event_id, date, date_time)`, not `event_id` alone), but also distinct
+    `event_id`s that point at the same `event.url` (the same event
+    scraped/listed more than once under different ids). `event_id` isn't a
+    reliable identity either way, so this dedupes on `url` instead, keeping
+    the first occurrence.
   - **Name blacklist** - events whose title exactly matches (case-insensitive)
     an entry in `src/eventNameBlacklist.js`'s `EVENT_NAME_BLACKLIST` are
     dropped. This is a frontend-only exclusion (no backend change) - edit
@@ -141,9 +144,10 @@ across a refresh via `localStorage` (`src/hooks/useLocalStorageState.js`).
 Hovering an event (list card or calendar event bar) reveals two icons at
 its right edge:
 
-- Plain trash - removes just this event (records `{event_id, title, date}`
-  in the `deletedEventIds` list). Distinct occurrences of the same
-  recurring event (different `event_id`) aren't affected.
+- Plain trash - removes just this event (records `{url, title, date}` in
+  the `deletedEventUrls` list, keyed by `event.url` for the same reason the
+  dedupe pass above is - `event_id` isn't reliable). A different event at a
+  different url isn't affected, even if it shares this one's title.
 - Trash with an "ALL" badge - removes every event with this exact title
   (records the title in the `deletedEventNames` list). This is a
   user-editable list, separate from the developer-maintained

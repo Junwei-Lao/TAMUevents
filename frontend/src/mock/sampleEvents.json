@@ -17,7 +17,7 @@
     "event_type": "Ceremony / Tradition"
   },
   {
-    "event_id": 372167,
+    "event_id": 372169,
     "group_title": "Academic Calendar",
     "url": "https://calendar.tamu.edu/registrar/event/372167-commencement-and-commissioning",
     "date": "September 15, 2026",
@@ -25,7 +25,7 @@
     "start_date": "2026-09-15",
     "end_date": "2026-09-15",
     "title": "Commencement and Commissioning",
-    "description": "Duplicate listing of the same event_id (a second ceremony session) - used to test frontend dedupe by id.",
+    "description": "Same url as event_id 372167 but a different event_id (the real-world scraping bug) - used to test frontend dedupe by url.",
     "location": "Reed Arena",
     "categories": ["Academic Calendar"],
     "categories_audience": ["Faculty", "Staff", "Students", "Visitors"],

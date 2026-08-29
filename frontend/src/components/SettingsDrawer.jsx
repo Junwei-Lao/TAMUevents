@@ -10,9 +10,9 @@ export default function SettingsDrawer({
   onThemeChange,
   viewMode,
   onViewModeChange,
-  deletedEventIds,
+  deletedEventUrls,
   deletedEventNames,
-  onRestoreById,
+  onRestoreByUrl,
   onRestoreByName,
 }) {
   const [page, setPage] = useState("main");
@@ -31,9 +31,9 @@ export default function SettingsDrawer({
       <aside className={`drawer drawer--right ${isOpen ? "drawer--open" : ""}`}>
         {page === "deleted" ? (
           <DeletedEventsPanel
-            deletedEventIds={deletedEventIds}
+            deletedEventUrls={deletedEventUrls}
             deletedEventNames={deletedEventNames}
-            onRestoreById={onRestoreById}
+            onRestoreByUrl={onRestoreByUrl}
             onRestoreByName={onRestoreByName}
             onBack={() => setPage("main")}
           />
@@ -94,7 +94,7 @@ export default function SettingsDrawer({
               >
                 <span>Deleted Events</span>
                 <span className="settings-nav-btn-count">
-                  {deletedEventIds.length + deletedEventNames.length}
+                  {deletedEventUrls.length + deletedEventNames.length}
                 </span>
                 <span aria-hidden="true">&rarr;</span>
               </button>

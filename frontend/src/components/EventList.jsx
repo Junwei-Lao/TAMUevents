@@ -20,7 +20,7 @@ function groupEventsByDay(events) {
   return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
-export default function EventList({ events, onDeleteById, onDeleteByName }) {
+export default function EventList({ events, onDeleteByUrl, onDeleteByName }) {
   const groupedEvents = groupEventsByDay(events);
 
   return (
@@ -35,7 +35,7 @@ export default function EventList({ events, onDeleteById, onDeleteByName }) {
               <EventCard
                 key={`${event.event_id}-${event.date}-${event.date_time}`}
                 event={event}
-                onDeleteById={onDeleteById}
+                onDeleteByUrl={onDeleteByUrl}
                 onDeleteByName={onDeleteByName}
               />
             ))}

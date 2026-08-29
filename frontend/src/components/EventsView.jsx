@@ -6,7 +6,7 @@ export default function EventsView({
   isLoading,
   error,
   viewMode,
-  onDeleteById,
+  onDeleteByUrl,
   onDeleteByName,
   calendarFocusDate,
   onCalendarFocusDateChange,
@@ -32,7 +32,7 @@ export default function EventsView({
     return (
       <EventCalendar
         events={events}
-        onDeleteById={onDeleteById}
+        onDeleteByUrl={onDeleteByUrl}
         onDeleteByName={onDeleteByName}
         focusDate={calendarFocusDate}
         onFocusDateChange={onCalendarFocusDateChange}
@@ -40,5 +40,5 @@ export default function EventsView({
     );
   }
 
-  return <EventList events={events} onDeleteById={onDeleteById} onDeleteByName={onDeleteByName} />;
+  return <EventList events={events} onDeleteByUrl={onDeleteByUrl} onDeleteByName={onDeleteByName} />;
 }
