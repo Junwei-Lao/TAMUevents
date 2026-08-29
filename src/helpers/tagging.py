@@ -677,4 +677,4 @@ def tag_sample_ers_events(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    tag_sample_ers_events()
+    tag_all_ers_events()

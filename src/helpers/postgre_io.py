@@ -1,4 +1,6 @@
-"""Initializes and populates the Postgres store for tagged TAMU events.
+"""Initializes and populates the Postgres store for tagged events, from
+any number of sources (see schema.py's "Event sources" section) - TAMU's
+calendar and TAMU's ERS registration system today.
 
 Schema design
 -------------
@@ -92,6 +94,12 @@ DEFAULT_ENV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
 DEFAULT_TAGGED_EVENTS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "events_tagged.json"
 )
+# tagging.py's tag_all_ers_events() output - a second source (TAMU's ERS
+# registration system), tagged the same way as the calendar scrape. See
+# append_tagged_events / initialize_database's DEFAULT_TAGGED_EVENT_PATHS.
+DEFAULT_TAGGED_ERS_EVENTS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "ers_events_tagged.json"
+)
 DEFAULT_CATEGORY_POOL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "category_pool.json"
 )
@@ -182,6 +190,16 @@ def save_pool_to_json(pool: Sequence[str], path: str) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(sorted(pool), fh, indent=2)
     logger.info("Wrote %d pool value(s) -> %s", len(pool), path)
+
+
+def load_pool_from_json(path: str) -> List[str]:
+    """Read back a pool JSON file written by save_pool_to_json. Returns []
+    if it doesn't exist yet, rather than raising - e.g. the very first time
+    append_tagged_events runs against a fresh database."""
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 _ORDINAL_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
@@ -957,45 +975,118 @@ def search_events(request: Optional[dict] = None, conn=None) -> List[dict]:
             conn.close()
 
 
-def initialize_database(
-    json_path: str = DEFAULT_TAGGED_EVENTS_PATH,
-    dbname: str = DB_NAME,
-    category_pool_path: str = DEFAULT_CATEGORY_POOL_PATH,
-    audience_pool_path: str = DEFAULT_AUDIENCE_POOL_PATH,
-) -> None:
-    """End-to-end setup: load data/events_tagged.json, discover the
-    categories/categories_audience pools (also saving each to its own JSON
-    file in data/, alongside writing them into category_pool/audience_pool),
-    create the database and tables if they don't exist yet, and load
-    everything in."""
+# Every known source's tagged-events file - initialize_database's default,
+# so a fresh setup pulls in every source at once rather than just TAMU's
+# calendar. Add a new source's tagged-JSON path here once it exists.
+DEFAULT_TAGGED_EVENT_PATHS: Tuple[str, ...] = (
+    DEFAULT_TAGGED_EVENTS_PATH,
+    DEFAULT_TAGGED_ERS_EVENTS_PATH,
+)
+
+
+def _merge_tagged_events_into_db(
+    conn,
+    json_path: str,
+    category_pool_path: str,
+    audience_pool_path: str,
+) -> int:
+    """Shared core of append_tagged_events/initialize_database: load one
+    tagged-events JSON file (any source - each event carries its own
+    `source`, see schema.py), merge its categories/categories_audience
+    values into the pool JSON snapshots (union with whatever's already
+    there, never overwritten - a second source must not erase the first
+    one's pool), write those same new values into category_pool/
+    audience_pool (populate_pools is itself additive via ON CONFLICT DO
+    NOTHING), and upsert the events. Returns how many events were loaded.
+    """
     events = load_tagged_events(json_path)
     logger.info("Loaded %d tagged events from %s", len(events), json_path)
 
-    category_pool = build_pool(events, "categories")
+    new_categories = build_pool(events, "categories")
+    new_audiences = build_pool(events, "categories_audience")
+    logger.info(
+        "%s: %d distinct categories, %d distinct audiences",
+        json_path, len(new_categories), len(new_audiences),
+    )
+
+    populate_pools(conn, new_categories, new_audiences)
+    upsert_events(conn, events)
+
     # EVERYONE_AUDIENCE is synthetic (normalize_audience's stand-in for a
     # missing audience) - it won't turn up scanning the raw scraped data,
     # so it's added by hand rather than relying on some event happening to
     # already use that literal string.
-    audience_pool = sorted(set(build_pool(events, "categories_audience")) | {EVERYONE_AUDIENCE})
-    logger.info(
-        "Discovered %d distinct categories, %d distinct audiences",
-        len(category_pool),
-        len(audience_pool),
+    merged_categories = sorted(set(load_pool_from_json(category_pool_path)) | set(new_categories))
+    merged_audiences = sorted(
+        set(load_pool_from_json(audience_pool_path)) | set(new_audiences) | {EVERYONE_AUDIENCE}
     )
-    save_pool_to_json(category_pool, category_pool_path)
-    save_pool_to_json(audience_pool, audience_pool_path)
+    save_pool_to_json(merged_categories, category_pool_path)
+    save_pool_to_json(merged_audiences, audience_pool_path)
 
+    return len(events)
+
+
+def append_tagged_events(
+    json_path: str,
+    dbname: str = DB_NAME,
+    category_pool_path: str = DEFAULT_CATEGORY_POOL_PATH,
+    audience_pool_path: str = DEFAULT_AUDIENCE_POOL_PATH,
+) -> int:
+    """Load a tagged-events JSON file - any source, e.g.
+    data/ers_events_tagged.json - and merge it into an *already set up*
+    database: unlike initialize_database, this doesn't touch
+    create_database_if_not_exists/create_tables, it just adds data (and
+    grows the category/audience pools to cover any new values that source
+    introduced). Use this to bring in a new source for the first time, or
+    to reload one after re-tagging it, without redoing full setup.
+    Returns the number of events loaded from `json_path`.
+    """
+    conn = connect(dbname)
+    try:
+        return _merge_tagged_events_into_db(
+            conn, json_path, category_pool_path, audience_pool_path
+        )
+    finally:
+        conn.close()
+
+
+def initialize_database(
+    json_paths: Sequence[str] = DEFAULT_TAGGED_EVENT_PATHS,
+    dbname: str = DB_NAME,
+    category_pool_path: str = DEFAULT_CATEGORY_POOL_PATH,
+    audience_pool_path: str = DEFAULT_AUDIENCE_POOL_PATH,
+) -> None:
+    """End-to-end setup: create the database and tables if they don't exist
+    yet, then load every source in `json_paths` (default: every known
+    source's tagged-events file, see DEFAULT_TAGGED_EVENT_PATHS) via
+    append_tagged_events's same merge logic - so re-running this after a
+    new source is added just picks it up, rather than needing a separate
+    step. A path that doesn't exist yet (e.g. you haven't tagged a source
+    yet) is skipped with a warning instead of failing the whole run.
+    """
     create_database_if_not_exists(dbname)
 
     conn = connect(dbname)
     try:
         create_tables(conn)
-        populate_pools(conn, category_pool, audience_pool)
-        upsert_events(conn, events)
+        total_events = 0
+        for json_path in json_paths:
+            if not os.path.exists(json_path):
+                logger.warning("Skipping missing tagged events file: %s", json_path)
+                continue
+            total_events += _merge_tagged_events_into_db(
+                conn, json_path, category_pool_path, audience_pool_path
+            )
+        logger.info(
+            "initialize_database: loaded %d event(s) across %d source file(s)",
+            total_events, len(json_paths),
+        )
     finally:
         conn.close()
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    patch_add_source_column()  # idempotent, so safe to run on a fresh database too
+    append_tagged_events(
+        DEFAULT_TAGGED_ERS_EVENTS_PATH
+    )
