@@ -20,10 +20,13 @@ Pipeline:
      sample_events.json (tag_sample_events(), for local testing against
      the small fixture), or (once postgre_io.py grows a read function for
      events_before_tagging) the database.
-  2. Group them by event_id and tag only one representative per id -
-     scraped feeds sometimes list the same event more than once (see the
-     duplicate event_id 372167 entries in data/sample_events.json), and
-     there's no reason to pay for the same classification twice.
+  2. Group them and tag only one representative per group - no reason to
+     pay for the same classification twice. Grouped by event_id by default
+     (scraped feeds sometimes list the same event more than once - see the
+     duplicate event_id 372167 entries in data/sample_events.json); ERS
+     events (tag_all_ers_events()) are grouped by title instead, since
+     that source hands every occurrence of a recurring event its own
+     unique id.
   3. Tag each representative event with two independent passes, then join
      their results rather than trusting the AI call alone:
        a. A keyword pass: match taxonomy leaf phrases (schema.py's
@@ -54,7 +57,7 @@ import re
 import tempfile
 import time
 from dataclasses import asdict
-from typing import Dict, List, Optional
+from typing import Callable, Dict, Hashable, List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -90,6 +93,20 @@ DEFAULT_EVENTS_PATH = os.path.join(
 )
 DEFAULT_TAGGED_EVENTS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "events_tagged.json"
+)
+# A different source (TAMU's ERS registration system, ers.tamu.edu) than
+# fetch_events.py's TAMU calendar scrape - see tag_all_ers_events().
+DEFAULT_ERS_EVENTS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "ers_events.json"
+)
+DEFAULT_TAGGED_ERS_EVENTS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "ers_events_tagged.json"
+)
+DEFAULT_SAMPLE_ERS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "sample_ers_events.json"
+)
+DEFAULT_TAGGED_SAMPLE_ERS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "data", "sample_ers_events_tagged.json"
 )
 DEFAULT_MAX_RETRIES = 4
 DEFAULT_BACKOFF_BASE_SECONDS = 5
@@ -390,14 +407,19 @@ def load_events_from_db() -> List[Event]:
     )
 
 
-def _group_by_event_id(events: List[Event]) -> Dict[int, List[Event]]:
-    """Group events by event_id, preserving first-seen order of ids.
-    Scraped feeds sometimes list the same event more than once (see the
-    duplicate event_id 372167 entries in data/sample_events.json)."""
-    groups: Dict[int, List[Event]] = {}
-    for event in events:
-        groups.setdefault(event.event_id, []).append(event)
-    return groups
+def _event_id_key(event: Event) -> int:
+    """Default grouping key: event_id. Scraped feeds sometimes list the
+    same event more than once under the same id (see the duplicate
+    event_id 372167 entries in data/sample_events.json)."""
+    return event.event_id
+
+
+def _event_title_key(event: Event) -> str:
+    """Grouping key for sources (e.g. ERS - see tag_all_ers_events()) that
+    hand out a fresh, never-repeated id to every occurrence of a recurring
+    event, so id-based grouping wouldn't catch anything - grouping by
+    title (case/whitespace-insensitive) does instead."""
+    return event.title.strip().lower()
 
 
 def _write_events_json(events: List[Event], path: str) -> None:
@@ -421,52 +443,35 @@ def _write_events_json(events: List[Event], path: str) -> None:
         raise
 
 
-def tag_events(
-    events: Optional[List[Event]] = None,
-    api_key: Optional[str] = None,
-    request_delay_seconds: float = DEFAULT_REQUEST_DELAY_SECONDS,
-    checkpoint_path: Optional[str] = None,
-    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
+def _tag_events_grouped(
+    events: List[Event],
+    key_func: Callable[[Event], Hashable],
+    api_key: Optional[str],
+    request_delay_seconds: float,
+    checkpoint_path: Optional[str],
+    checkpoint_every: int,
 ) -> List[Event]:
-    """Classify a list of Events in place (e.g. the output of
-    fetch_events.fetch_all_events) and return the same list.
-
-    If `events` is omitted, it's loaded from data/events.json (the real,
-    full scrape - fetch_events.fetch_all_events's output) via
-    load_events_from_json(DEFAULT_EVENTS_PATH). Pass a list explicitly
-    (e.g. tag_sample_events() does, for the small test fixture) to tag
-    something else.
-
-    Events sharing the same event_id are only sent to the API once - the
-    first occurrence is tagged, and the resulting topics/event_type are
-    copied onto every other event with that id.
-
-    If checkpoint_path is given, the full `events` list (including events
-    not yet tagged) is written to it as JSON after every `checkpoint_every`
-    tagged event (default 20), and once more when tagging finishes if the
-    final count wasn't already on a checkpoint boundary - so a crash or
-    interrupted run partway through a long batch doesn't lose everything
-    tagged so far. "Tagged event" here means unique event_id groups, since
-    that's what actually costs an API call and takes time; duplicates are
-    instant and don't affect the checkpoint cadence.
+    """Shared implementation behind tag_events() / tag_all_ers_events():
+    group `events` by key_func(event), tag only one representative per
+    group, and copy its topics/event_type onto every other event with the
+    same key. Checkpointing works identically regardless of grouping key.
     """
     if checkpoint_path is not None and checkpoint_every < 1:
         raise ValueError("checkpoint_every must be >= 1")
-
-    if events is None:
-        events = load_events_from_json(DEFAULT_EVENTS_PATH)
-        logger.info("Loaded %d event(s) from %s", len(events), DEFAULT_EVENTS_PATH)
 
     api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set")
 
     session = requests.Session()
-    groups = _group_by_event_id(events)
+    groups: Dict[Hashable, List[Event]] = {}
+    for event in events:
+        groups.setdefault(key_func(event), []).append(event)
+
     duplicate_count = len(events) - len(groups)
     if duplicate_count:
         logger.info(
-            "Skipping %d duplicate event(s) by id; tagging %d unique event(s)",
+            "Skipping %d duplicate event(s) by grouping key; tagging %d unique event(s)",
             duplicate_count, len(groups),
         )
 
@@ -500,6 +505,50 @@ def tag_events(
         _write_events_json(events, checkpoint_path)
 
     return events
+
+
+def tag_events(
+    events: Optional[List[Event]] = None,
+    api_key: Optional[str] = None,
+    request_delay_seconds: float = DEFAULT_REQUEST_DELAY_SECONDS,
+    checkpoint_path: Optional[str] = None,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
+) -> List[Event]:
+    """Classify a list of Events in place (e.g. the output of
+    fetch_events.fetch_all_events) and return the same list.
+
+    If `events` is omitted, it's loaded from data/events.json (the real,
+    full scrape - fetch_events.fetch_all_events's output) via
+    load_events_from_json(DEFAULT_EVENTS_PATH). Pass a list explicitly
+    (e.g. tag_sample_events() does, for the small test fixture) to tag
+    something else.
+
+    Events sharing the same event_id are only sent to the API once - the
+    first occurrence is tagged, and the resulting topics/event_type are
+    copied onto every other event with that id. (For a source where
+    grouping should instead be by title, see tag_all_ers_events().)
+
+    If checkpoint_path is given, the full `events` list (including events
+    not yet tagged) is written to it as JSON after every `checkpoint_every`
+    tagged event (default 20), and once more when tagging finishes if the
+    final count wasn't already on a checkpoint boundary - so a crash or
+    interrupted run partway through a long batch doesn't lose everything
+    tagged so far. "Tagged event" here means unique event_id groups, since
+    that's what actually costs an API call and takes time; duplicates are
+    instant and don't affect the checkpoint cadence.
+    """
+    if events is None:
+        events = load_events_from_json(DEFAULT_EVENTS_PATH)
+        logger.info("Loaded %d event(s) from %s", len(events), DEFAULT_EVENTS_PATH)
+
+    return _tag_events_grouped(
+        events,
+        key_func=_event_id_key,
+        api_key=api_key,
+        request_delay_seconds=request_delay_seconds,
+        checkpoint_path=checkpoint_path,
+        checkpoint_every=checkpoint_every,
+    )
 
 
 def tag_sample_events(
@@ -554,6 +603,78 @@ def tag_all_events(
     return events
 
 
+def tag_all_ers_events(
+    input_path: str = DEFAULT_ERS_EVENTS_PATH,
+    output_path: str = DEFAULT_TAGGED_ERS_EVENTS_PATH,
+    api_key: Optional[str] = None,
+    request_delay_seconds: float = DEFAULT_REQUEST_DELAY_SECONDS,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
+) -> List[Event]:
+    """Load events from data/ers_events.json - TAMU's ERS registration
+    system (ers.tamu.edu), a different source than fetch_events.py's TAMU
+    calendar scrape - tag them, and write the tagged events to output_path
+    (data/ers_events_tagged.json).
+
+    Unlike tag_events()/tag_all_events(), grouping for the "only pay for
+    one API call per repeat" optimization is done by *title*, not
+    event_id: ERS hands out a fresh, never-repeated event_id (ScheduleId)
+    to every occurrence of a recurring event - e.g. "Conversation Circle
+    for English Language Proficiency" appears 51 times in one snapshot of
+    data/ers_events.json, each with its own event_id - so id-based
+    grouping wouldn't catch any of that at all (332 events, 332 unique
+    ids, but only 130 unique titles). Events with the same title
+    (case/whitespace-insensitive) are treated as the same event for
+    tagging purposes and end up with identical topics/event_type.
+    """
+    events = load_events_from_json(input_path)
+    logger.info("Loaded %d event(s) from %s", len(events), input_path)
+
+    _tag_events_grouped(
+        events,
+        key_func=_event_title_key,
+        api_key=api_key,
+        request_delay_seconds=request_delay_seconds,
+        checkpoint_path=output_path,
+        checkpoint_every=checkpoint_every,
+    )
+    logger.info("Tagged %d events -> %s", len(events), output_path)
+
+    return events
+
+
+def tag_sample_ers_events(
+    input_path: str = DEFAULT_SAMPLE_ERS_PATH,
+    output_path: str = DEFAULT_TAGGED_SAMPLE_ERS_PATH,
+    api_key: Optional[str] = None,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
+) -> List[Event]:
+    """Load events from data/sample_ers_events.json, tag them grouped by
+    title like tag_all_ers_events(), and write the tagged sample to
+    output_path. Local-testing equivalent of tag_sample_events() for the
+    ERS source - a small fixture to test/iterate against without burning
+    API calls tagging the full data/ers_events.json.
+
+    The fixture already contains repeated titles (e.g. "Conversation
+    Circle for English Language Proficiency" appears more than once), so
+    it exercises the same-title grouping/propagation behavior, not just
+    single-event tagging.
+    """
+    events = load_events_from_json(input_path)
+    logger.info("Loaded %d event(s) from %s", len(events), input_path)
+
+    _tag_events_grouped(
+        events,
+        key_func=_event_title_key,
+        api_key=api_key,
+        request_delay_seconds=DEFAULT_REQUEST_DELAY_SECONDS,
+        checkpoint_path=output_path,
+        checkpoint_every=checkpoint_every,
+    )
+    logger.info("Tagged %d events -> %s", len(events), output_path)
+
+    return events
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    tag_all_events()
+    tag_sample_ers_events()

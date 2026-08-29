@@ -65,9 +65,10 @@ from typing import Dict, List, Optional
 # module's "Event sources" docstring section above. Extend this dict (never
 # renumber existing entries) whenever a new source is added.
 DEFAULT_SOURCE = 0
+ERS_SOURCE = 1
 SOURCES: Dict[int, str] = {
     DEFAULT_SOURCE: "TAMU Calendar",
-    1: "TAMU ERS",
+    ERS_SOURCE: "TAMU ERS",
 }
 
 

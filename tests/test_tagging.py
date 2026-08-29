@@ -591,3 +591,170 @@ def test_tag_all_events_loads_from_events_json_and_writes_tagged_output(monkeypa
 def test_tag_all_events_defaults_point_at_events_json_and_events_tagged_json():
     assert tagging.DEFAULT_EVENTS_PATH.endswith(os.path.join("data", "events.json"))
     assert tagging.DEFAULT_TAGGED_EVENTS_PATH.endswith(os.path.join("data", "events_tagged.json"))
+
+
+# --- tag_all_ers_events: grouped by title, not event_id -----------------
+
+
+def test_event_title_key_normalizes_case_and_whitespace():
+    a = _make_event(title="  Conversation Circle  ")
+    b = _make_event(title="conversation circle")
+    assert tagging._event_title_key(a) == tagging._event_title_key(b)
+
+
+def test_tag_all_ers_events_groups_by_title_not_event_id(monkeypatch, tmp_path):
+    # Same setup as the real data/ers_events.json: every occurrence gets
+    # its own unique event_id, but recurring events share a title.
+    raw_events = [
+        asdict(_make_event(title="Conversation Circle", event_id=1)),
+        asdict(_make_event(title="Conversation Circle", event_id=2)),
+        asdict(_make_event(title="Conversation Circle", event_id=3)),
+        asdict(_make_event(title="Math Workshop", event_id=4)),
+        asdict(_make_event(title="Math Workshop", event_id=5)),
+    ]
+    input_path = tmp_path / "ers_events.json"
+    input_path.write_text(json.dumps(raw_events), encoding="utf-8")
+    output_path = tmp_path / "ers_events_tagged.json"
+
+    call_count = {"n": 0}
+
+    def fake_post_with_retry(session, api_key, messages, **kwargs):
+        call_count["n"] += 1
+        user_content = messages[1]["content"]
+        if "Conversation Circle" in user_content:
+            return _fake_response(["Cross-cultural Studies"], "Workshop")
+        return _fake_response(["Mathematics / Statistics"], "Workshop")
+
+    monkeypatch.setattr(tagging, "_post_with_retry", fake_post_with_retry)
+
+    tagged = tagging.tag_all_ers_events(
+        input_path=str(input_path), output_path=str(output_path), api_key=FAKE_API_KEY
+    )
+
+    # 2 unique titles among 5 events -> 2 API calls, not 5.
+    assert call_count["n"] == 2
+
+    by_id = {event.event_id: event for event in tagged}
+    assert by_id[1].topics == by_id[2].topics == by_id[3].topics == {
+        "International & Global Studies": ["Cross-cultural Studies"],
+    }
+    assert by_id[1].event_type == by_id[2].event_type == by_id[3].event_type == "Workshop / Training"
+
+    assert by_id[4].topics == by_id[5].topics == {"STEM & Technology": ["Mathematics / Statistics"]}
+    assert by_id[4].event_type == "Workshop / Training"
+
+    # Distinct-title groups are still tagged independently of each other.
+    assert by_id[1].topics != by_id[4].topics
+
+    assert output_path.exists()
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(written) == 5
+
+
+def test_tag_all_ers_events_defaults_point_at_ers_events_json():
+    assert tagging.DEFAULT_ERS_EVENTS_PATH.endswith(os.path.join("data", "ers_events.json"))
+    assert tagging.DEFAULT_TAGGED_ERS_EVENTS_PATH.endswith(
+        os.path.join("data", "ers_events_tagged.json")
+    )
+
+
+def test_tag_all_ers_events_checkpoints_by_unique_title_count(monkeypatch, tmp_path):
+    raw_events = [
+        asdict(_make_event(title="A", event_id=1)),
+        asdict(_make_event(title="A", event_id=2)),
+        asdict(_make_event(title="B", event_id=3)),
+        asdict(_make_event(title="C", event_id=4)),
+    ]
+    input_path = tmp_path / "ers_events.json"
+    input_path.write_text(json.dumps(raw_events), encoding="utf-8")
+
+    checkpoint_snapshots = []
+
+    def fake_write(events, path):
+        checkpoint_snapshots.append(sum(1 for e in events if e.event_type))
+
+    monkeypatch.setattr(tagging, "_write_events_json", fake_write)
+    monkeypatch.setattr(
+        tagging, "_post_with_retry",
+        lambda *a, **k: _fake_response(["General Interest"], "Other"),
+    )
+
+    tagging.tag_all_ers_events(
+        input_path=str(input_path),
+        output_path=str(tmp_path / "ers_events_tagged.json"),
+        api_key=FAKE_API_KEY,
+        checkpoint_every=1,
+    )
+
+    # 3 unique titles (A, B, C) -> 3 checkpoints, each covering more
+    # already-tagged events than the last (A's checkpoint covers both A
+    # events at once, since they're tagged together).
+    assert checkpoint_snapshots == [2, 3, 4]
+
+
+# --- tag_sample_ers_events: real small ERS fixture, grouped by title ---
+
+
+def _load_sample_ers_events():
+    with open(tagging.DEFAULT_SAMPLE_ERS_PATH, "r", encoding="utf-8") as fh:
+        raw_events = json.load(fh)
+    return [Event(**item) for item in raw_events]
+
+
+def test_sample_ers_events_fixture_has_repeated_titles():
+    # This test's premise (grouping actually does something observable)
+    # depends on the fixture containing a real duplicate title, the same
+    # way the sample_events.json tests depend on the known event_id
+    # 372167 duplicate pair.
+    events = _load_sample_ers_events()
+    titles = [event.title for event in events]
+    assert len(set(titles)) < len(titles), (
+        "expected data/sample_ers_events.json to contain at least one repeated title"
+    )
+
+
+def test_tag_sample_ers_events_groups_by_title(monkeypatch, tmp_path):
+    events = _load_sample_ers_events()
+    duplicate_titles = {
+        title for title in (e.title for e in events)
+        if sum(1 for e2 in events if e2.title == title) > 1
+    }
+    assert duplicate_titles, "fixture has no repeated title to test grouping against"
+    sample_title = next(iter(duplicate_titles))
+    duplicate_pair = [e for e in events if e.title == sample_title]
+
+    call_count = {"n": 0}
+
+    def fake_post_with_retry(session, api_key, messages, **kwargs):
+        call_count["n"] += 1
+        return _fake_response(["General Interest"], "Other")
+
+    monkeypatch.setattr(tagging, "_post_with_retry", fake_post_with_retry)
+
+    output_path = tmp_path / "sample_ers_events_tagged.json"
+    tagged = tagging.tag_sample_ers_events(
+        input_path=tagging.DEFAULT_SAMPLE_ERS_PATH,
+        output_path=str(output_path),
+        api_key=FAKE_API_KEY,
+    )
+
+    unique_titles = {event.title.strip().lower() for event in tagged}
+    assert call_count["n"] == len(unique_titles)
+    assert call_count["n"] < len(tagged)  # fewer calls than events, thanks to grouping
+
+    tagged_by_id = {event.event_id: event for event in tagged}
+    first, *rest = [tagged_by_id[e.event_id] for e in duplicate_pair]
+    for other in rest:
+        assert other.topics == first.topics
+        assert other.event_type == first.event_type
+
+    assert output_path.exists()
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(written) == len(events)
+
+
+def test_tag_sample_ers_events_default_paths():
+    assert tagging.DEFAULT_SAMPLE_ERS_PATH.endswith(os.path.join("data", "sample_ers_events.json"))
+    assert tagging.DEFAULT_TAGGED_SAMPLE_ERS_PATH.endswith(
+        os.path.join("data", "sample_ers_events_tagged.json")
+    )
