@@ -1,0 +1,1 @@
+This is an older announcement kept only to demonstrate that the site always shows the most recent file in this folder - it should never appear on its own once a newer announcement_YYYY_M_D.txt file exists.

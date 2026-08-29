@@ -3,6 +3,7 @@ import Header from "./components/Header.jsx";
 import FilterDrawer from "./components/FilterDrawer.jsx";
 import SettingsDrawer from "./components/SettingsDrawer.jsx";
 import EventsView from "./components/EventsView.jsx";
+import AnnouncementPanel from "./components/AnnouncementPanel.jsx";
 import Footer from "./components/Footer.jsx";
 import { searchEvents } from "./api.js";
 import { DEFAULT_FILTERS } from "./filterOptions.js";
@@ -11,6 +12,7 @@ import { EVENT_NAME_BLACKLIST } from "./eventNameBlacklist.js";
 import { useLocalStorageState } from "./hooks/useLocalStorageState.js";
 import { applyTheme, DEFAULT_THEME_KEY } from "./themes.js";
 import { parseIsoDateLocal } from "./dateUtils.js";
+import { getLatestAnnouncement } from "./announcements.js";
 
 function toIsoDate(date) {
   const year = date.getFullYear();
@@ -66,6 +68,27 @@ export default function App() {
   const [viewMode, setViewMode] = useLocalStorageState("viewMode", "list");
   const [deletedEventIds, setDeletedEventIds] = useLocalStorageState("deletedEventIds", []);
   const [deletedEventNames, setDeletedEventNames] = useLocalStorageState("deletedEventNames", []);
+
+  // The newest file in src/announcement/, and whether the user has
+  // permanently dismissed it ("never show again"). Comparing by id (the
+  // file path) rather than a single "dismissed" boolean means a future
+  // announcement file always shows once, even if an older one was
+  // dismissed for good.
+  const [dismissedAnnouncementId, setDismissedAnnouncementId] = useLocalStorageState(
+    "dismissedAnnouncementId",
+    null
+  );
+  const latestAnnouncement = useMemo(() => getLatestAnnouncement(), []);
+  const [isAnnouncementVisible, setIsAnnouncementVisible] = useState(
+    () => Boolean(latestAnnouncement) && latestAnnouncement.id !== dismissedAnnouncementId
+  );
+
+  const confirmAnnouncement = (neverShowAgain) => {
+    if (neverShowAgain && latestAnnouncement) {
+      setDismissedAnnouncementId(latestAnnouncement.id);
+    }
+    setIsAnnouncementVisible(false);
+  };
 
   useEffect(() => applyTheme(themeKey), [themeKey]);
 
@@ -143,6 +166,9 @@ export default function App() {
 
   return (
     <div className="app">
+      {isAnnouncementVisible && latestAnnouncement && (
+        <AnnouncementPanel announcement={latestAnnouncement} onConfirm={confirmAnnouncement} />
+      )}
       <Header onMenuClick={openDrawer} onSettingsClick={openSettings} />
       <FilterDrawer
         isOpen={isDrawerOpen}

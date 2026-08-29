@@ -153,3 +153,23 @@ Both apply live against whatever the last search returned (`App.jsx`'s
 `visibleEvents`), so deleting/restoring updates the main page immediately
 without re-running the search - restoring only brings an event back if it's
 still part of the last fetched results.
+
+## Announcement panel
+
+On load, if `announcement/` has any `announcement_<year>_<month>_<day>.txt`
+files, the one with the latest date is shown as a centered modal with its
+text (one paragraph, read verbatim - `src/announcements.js` picks the file
+via Vite's `import.meta.glob` at build time, there's no backend endpoint for
+this) plus a "Never show this announcement again" checkbox and a Confirm
+button.
+
+- **Confirm** alone just closes it for the current page load - it reappears
+  next visit.
+- Checking **"Never show this announcement again"** before confirming
+  additionally persists that specific file's path to `localStorage`
+  (`dismissedAnnouncementId`), so *that* announcement won't show again - but
+  dropping a newer-dated file into `announcement/` still shows once,
+  since it's compared by file identity, not a single blanket flag.
+
+To publish a new announcement, add a new `announcement_YYYY_M_D.txt` file
+(old ones can stay for history, only the latest is ever shown).
