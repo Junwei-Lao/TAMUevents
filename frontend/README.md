@@ -17,11 +17,12 @@ served by a mock middleware in `vite.config.js` backed by
 To hit the real backend instead, start it from `src/helpers`:
 
 ```bash
-uvicorn backend:app --port 8000
+uvicorn backend:app --port 9191
 ```
 
-and set `VITE_API_BASE_URL=http://localhost:8000/api` in `frontend/.env`
-(copy `.env.example`).
+and set `VITE_API_BASE_URL=http://localhost:9191/api` in `frontend/.env`
+(copy `.env.example`). 9191 matches `src/main.py`'s default and the
+`nginx_config/` deployment setup - keep it in sync with those if it changes.
 
 ## API contract (implemented by `src/helpers/backend.py`)
 
@@ -111,4 +112,44 @@ Each item is the JSON form of the `Event` dataclass in
     occurrence per id is kept.
   - **Name blacklist** - events whose title exactly matches (case-insensitive)
     an entry in `src/eventNameBlacklist.js`'s `EVENT_NAME_BLACKLIST` are
-    dropped. This is a frontend-only exclusion (no backend change)
+    dropped. This is a frontend-only exclusion (no backend change) - edit
+    that file's entries to the real titles you want to exclude.
+
+## Settings (gear icon, top-right)
+
+Opens a right-side drawer. Unlike search results, everything here persists
+across a refresh via `localStorage` (`src/hooks/useLocalStorageState.js`).
+
+- **Theme Color** - 6 selectable accent colors (`src/themes.js`), applied by
+  setting the `--accent` / `--accent-dark` / `--accent-soft` CSS custom
+  properties on `<html>` (see `applyTheme`). Add more by adding entries to
+  `THEMES`.
+- **View** - switches the main page between the day-by-day **List** and a
+  month **Calendar** (`react-big-calendar`, `src/components/EventCalendar.jsx`).
+  The calendar auto-jumps to the month of the earliest result whenever a new
+  search completes, but otherwise leaves manual navigation alone.
+- **Deleted Events** - opens a sub-page with two tabs, **By Event** (events
+  removed individually, restorable one at a time) and **By Name** (event
+  names removed entirely, restorable by name). Both lists are the same ones
+  written to by the trash icons below - "Restore" just removes the entry
+  from the corresponding `localStorage` list.
+- **About Us** - opens `src/aboutUs.js`'s `ABOUT_US_URL` (currently a
+  placeholder) in a new tab.
+
+### Per-event delete icons
+
+Hovering an event (list card or calendar event bar) reveals two icons at
+its right edge:
+
+- Plain trash - removes just this event (records `{event_id, title, date}`
+  in the `deletedEventIds` list). Distinct occurrences of the same
+  recurring event (different `event_id`) aren't affected.
+- Trash with an "ALL" badge - removes every event with this exact title
+  (records the title in the `deletedEventNames` list). This is a
+  user-editable list, separate from the developer-maintained
+  `EVENT_NAME_BLACKLIST` above, though both are applied together.
+
+Both apply live against whatever the last search returned (`App.jsx`'s
+`visibleEvents`), so deleting/restoring updates the main page immediately
+without re-running the search - restoring only brings an event back if it's
+still part of the last fetched results.

@@ -1,12 +1,16 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Header from "./components/Header.jsx";
 import FilterDrawer from "./components/FilterDrawer.jsx";
-import EventList from "./components/EventList.jsx";
+import SettingsDrawer from "./components/SettingsDrawer.jsx";
+import EventsView from "./components/EventsView.jsx";
 import Footer from "./components/Footer.jsx";
 import { searchEvents } from "./api.js";
 import { DEFAULT_FILTERS } from "./filterOptions.js";
 import { dedupeEventsById, excludeBlacklistedEvents } from "./eventFilters.js";
 import { EVENT_NAME_BLACKLIST } from "./eventNameBlacklist.js";
+import { useLocalStorageState } from "./hooks/useLocalStorageState.js";
+import { applyTheme, DEFAULT_THEME_KEY } from "./themes.js";
+import { parseIsoDateLocal } from "./dateUtils.js";
 
 function toIsoDate(date) {
   const year = date.getFullYear();
@@ -40,14 +44,48 @@ function buildRequestBody(range, filters) {
 
 export default function App() {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [pendingRange, setPendingRange] = useState(undefined);
   const [pendingFilters, setPendingFilters] = useState(DEFAULT_FILTERS);
-  const [events, setEvents] = useState([]);
+  // The raw (deduped + code-blacklisted) results of the last search - not
+  // itself shown directly, see visibleEvents below.
+  const [rawEvents, setRawEvents] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+  // Which month the calendar view is showing. Reset to the earliest result
+  // whenever a new search completes (see applyFilter) so switching to
+  // Calendar right after applying a future date range doesn't land on an
+  // empty "today" month; left alone otherwise (e.g. deleting/restoring an
+  // event, or the user manually paging the calendar) so it doesn't jump
+  // around from actions unrelated to running a new search.
+  const [calendarFocusDate, setCalendarFocusDate] = useState(new Date());
+
+  // Settings persist across a refresh (unlike rawEvents/pendingRange/
+  // pendingFilters above, which intentionally reset - see README).
+  const [themeKey, setThemeKey] = useLocalStorageState("themeKey", DEFAULT_THEME_KEY);
+  const [viewMode, setViewMode] = useLocalStorageState("viewMode", "list");
+  const [deletedEventIds, setDeletedEventIds] = useLocalStorageState("deletedEventIds", []);
+  const [deletedEventNames, setDeletedEventNames] = useLocalStorageState("deletedEventNames", []);
+
+  useEffect(() => applyTheme(themeKey), [themeKey]);
+
+  // Deletions/restores apply live against whatever was last fetched, so
+  // toggling them in Settings updates the main page immediately without
+  // needing to re-run the search.
+  const visibleEvents = useMemo(() => {
+    const deletedIds = new Set(deletedEventIds.map((entry) => entry.event_id));
+    const deletedNames = new Set(deletedEventNames.map((name) => name.toLowerCase()));
+    return rawEvents.filter(
+      (event) =>
+        !deletedIds.has(event.event_id) &&
+        !deletedNames.has((event.title || "").toLowerCase())
+    );
+  }, [rawEvents, deletedEventIds, deletedEventNames]);
 
   const openDrawer = () => setIsDrawerOpen(true);
   const closeDrawer = () => setIsDrawerOpen(false);
+  const openSettings = () => setIsSettingsOpen(true);
+  const closeSettings = () => setIsSettingsOpen(false);
 
   const updateFilter = (key, value) =>
     setPendingFilters((prev) => ({ ...prev, [key]: value }));
@@ -66,7 +104,15 @@ export default function App() {
         buildRequestBody(pendingRange, pendingFilters)
       );
       const deduped = dedupeEventsById(results);
-      setEvents(excludeBlacklistedEvents(deduped, EVENT_NAME_BLACKLIST));
+      const finalResults = excludeBlacklistedEvents(deduped, EVENT_NAME_BLACKLIST);
+      setRawEvents(finalResults);
+
+      const earliestStartDate = finalResults
+        .map((event) => event.start_date)
+        .filter(Boolean)
+        .sort()[0];
+      if (earliestStartDate) setCalendarFocusDate(parseIsoDateLocal(earliestStartDate));
+
       setIsDrawerOpen(false);
     } catch (err) {
       setError(err.message || "Something went wrong while loading events.");
@@ -75,9 +121,29 @@ export default function App() {
     }
   };
 
+  const deleteEventById = (event) => {
+    setDeletedEventIds((prev) =>
+      prev.some((entry) => entry.event_id === event.event_id)
+        ? prev
+        : [...prev, { event_id: event.event_id, title: event.title, date: event.date }]
+    );
+  };
+
+  const deleteEventsByName = (event) => {
+    setDeletedEventNames((prev) => (prev.includes(event.title) ? prev : [...prev, event.title]));
+  };
+
+  const restoreEventById = (eventId) => {
+    setDeletedEventIds((prev) => prev.filter((entry) => entry.event_id !== eventId));
+  };
+
+  const restoreEventByName = (name) => {
+    setDeletedEventNames((prev) => prev.filter((n) => n !== name));
+  };
+
   return (
     <div className="app">
-      <Header onMenuClick={openDrawer} />
+      <Header onMenuClick={openDrawer} onSettingsClick={openSettings} />
       <FilterDrawer
         isOpen={isDrawerOpen}
         range={pendingRange}
@@ -89,8 +155,29 @@ export default function App() {
         onClose={closeDrawer}
         isLoading={isLoading}
       />
-      <main className="main-content">
-        <EventList events={events} isLoading={isLoading} error={error} />
+      <SettingsDrawer
+        isOpen={isSettingsOpen}
+        onClose={closeSettings}
+        themeKey={themeKey}
+        onThemeChange={setThemeKey}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        deletedEventIds={deletedEventIds}
+        deletedEventNames={deletedEventNames}
+        onRestoreById={restoreEventById}
+        onRestoreByName={restoreEventByName}
+      />
+      <main className={`main-content ${viewMode === "calendar" ? "main-content--calendar" : ""}`}>
+        <EventsView
+          events={visibleEvents}
+          isLoading={isLoading}
+          error={error}
+          viewMode={viewMode}
+          onDeleteById={deleteEventById}
+          onDeleteByName={deleteEventsByName}
+          calendarFocusDate={calendarFocusDate}
+          onCalendarFocusDateChange={setCalendarFocusDate}
+        />
       </main>
       <Footer />
     </div>
