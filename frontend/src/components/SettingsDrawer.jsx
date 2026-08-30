@@ -8,11 +8,13 @@ export default function SettingsDrawer({
   onClose,
   themeKey,
   onThemeChange,
+  colorMode,
+  onColorModeChange,
   viewMode,
   onViewModeChange,
-  deletedEventUrls,
+  deletedEvents,
   deletedEventNames,
-  onRestoreByUrl,
+  onRestoreEvent,
   onRestoreByName,
 }) {
   const [page, setPage] = useState("main");
@@ -31,9 +33,9 @@ export default function SettingsDrawer({
       <aside className={`drawer drawer--right ${isOpen ? "drawer--open" : ""}`}>
         {page === "deleted" ? (
           <DeletedEventsPanel
-            deletedEventUrls={deletedEventUrls}
+            deletedEvents={deletedEvents}
             deletedEventNames={deletedEventNames}
-            onRestoreByUrl={onRestoreByUrl}
+            onRestoreEvent={onRestoreEvent}
             onRestoreByName={onRestoreByName}
             onBack={() => setPage("main")}
           />
@@ -67,6 +69,26 @@ export default function SettingsDrawer({
             </div>
 
             <div className="settings-section">
+              <h3 className="drawer-section-title">Appearance</h3>
+              <div className="view-toggle">
+                <button
+                  type="button"
+                  className={`view-toggle-btn ${colorMode === "light" ? "view-toggle-btn--active" : ""}`}
+                  onClick={() => onColorModeChange("light")}
+                >
+                  Light
+                </button>
+                <button
+                  type="button"
+                  className={`view-toggle-btn ${colorMode === "dark" ? "view-toggle-btn--active" : ""}`}
+                  onClick={() => onColorModeChange("dark")}
+                >
+                  Dark
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-section">
               <h3 className="drawer-section-title">View</h3>
               <div className="view-toggle">
                 <button
@@ -94,7 +116,7 @@ export default function SettingsDrawer({
               >
                 <span>Deleted Events</span>
                 <span className="settings-nav-btn-count">
-                  {deletedEventUrls.length + deletedEventNames.length}
+                  {deletedEvents.length + deletedEventNames.length}
                 </span>
                 <span aria-hidden="true">&rarr;</span>
               </button>

@@ -1,13 +1,54 @@
 :root {
+  /* --accent is the one hand-picked value per theme (set below by
+     [data-theme="..."], matching src/themes.js's THEMES - keep the two in
+     sync by hand). Everything else derives from it via color-mix() so
+     adding a theme or a color-mode never needs more than one new color:
+       --accent-dark: solid-fill hover/border shade, and text-on-page use
+         in light mode (via --accent-text).
+       --accent-soft: light/dark tinted highlight background (chip toggles,
+         badges, "today" marker).
+       --accent-text: accent color as text-on-page - equals --accent-dark
+         in light mode, but a lightened mix in dark mode, where
+         --accent-dark itself is too low-contrast to read as text. */
   --accent: #500000;
-  --accent-dark: #3a0000;
-  --accent-soft: #f1e9e9;
+  --accent-dark: color-mix(in srgb, var(--accent) 75%, black);
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, white);
+  --accent-text: var(--accent-dark);
+
   --bg: #f7f5f3;
   --card-bg: #ffffff;
   --border: #e2ddd8;
   --text: #26221f;
   --text-muted: #6b6560;
   color-scheme: light;
+}
+
+/* Theme color: each swatch in Settings just picks one --accent hex - see
+   src/themes.js's THEMES (keep the hex values in sync by hand). */
+[data-theme="maroon"] { --accent: #500000; }
+[data-theme="indigo"] { --accent: #4f46e5; }
+[data-theme="teal"] { --accent: #0d9488; }
+[data-theme="emerald"] { --accent: #059669; }
+[data-theme="slate"] { --accent: #334155; }
+[data-theme="coral"] { --accent: #e11d48; }
+
+/* Dark mode: redefine the neutral surface palette, plus the two accent
+   derivatives whose light-mode math (mixing toward white/black) would
+   otherwise still assume a light page. Everything built on these two
+   variable groups (nearly the whole stylesheet) picks this up
+   automatically - see src/colorMode.js for how the attribute is applied,
+   and the bottom of this file for the handful of rules (mostly
+   react-day-picker/react-big-calendar's own default styles) that needed a
+   direct override instead of just inheriting a variable. */
+[data-color-mode="dark"] {
+  --bg: #16171b;
+  --card-bg: #212329;
+  --border: #383b45;
+  --text: #edeef1;
+  --text-muted: #9ba0ac;
+  --accent-soft: color-mix(in srgb, var(--accent) 25%, black);
+  --accent-text: color-mix(in srgb, var(--accent) 55%, white);
+  color-scheme: dark;
 }
 
 * {
@@ -114,7 +155,7 @@ body {
 }
 
 .footer a {
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
   text-decoration: none;
 }
@@ -143,7 +184,7 @@ body {
 .event-day-header {
   font-size: 1.1rem;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--accent-text);
   padding-bottom: 0.4rem;
   margin: 0 0 1rem;
   border-bottom: 2px solid var(--accent);
@@ -176,7 +217,7 @@ body {
   margin: 0 0 0.3rem;
   padding-right: 4.5rem;
   font-size: 1.05rem;
-  color: var(--accent-dark);
+  color: var(--accent-text);
 }
 
 .event-card-date {
@@ -224,7 +265,7 @@ body {
   height: 28px;
   border-radius: 6px;
   border: 1px solid var(--border);
-  background: white;
+  background: var(--card-bg);
   cursor: pointer;
   padding: 0;
 }
@@ -280,7 +321,7 @@ body {
   left: 0;
   bottom: 0;
   width: min(420px, 92vw);
-  background: white;
+  background: var(--card-bg);
   box-shadow: 2px 0 20px rgba(0, 0, 0, 0.15);
   transform: translateX(-100%);
   transition: transform 0.25s ease;
@@ -305,7 +346,7 @@ body {
 .drawer-header h2 {
   margin: 0;
   font-size: 1.1rem;
-  color: var(--accent-dark);
+  color: var(--accent-text);
 }
 
 .drawer-close-btn {
@@ -370,7 +411,7 @@ body {
   padding: 0.32rem 0.65rem;
   border-radius: 999px;
   border: 1px solid var(--border);
-  background: white;
+  background: var(--card-bg);
   color: var(--text);
   font-size: 0.78rem;
   line-height: 1.2;
@@ -416,7 +457,7 @@ body {
   padding: 0.32rem 0.55rem;
   border: none;
   border-left: 1px solid var(--border);
-  background: white;
+  background: var(--card-bg);
   color: var(--text-muted);
   font-size: 0.78rem;
   cursor: pointer;
@@ -424,12 +465,12 @@ body {
 }
 
 .chip-expand-btn:hover {
-  color: var(--accent-dark);
+  color: var(--accent-text);
 }
 
 .chip-expand-btn--active {
   background: var(--accent-soft);
-  color: var(--accent-dark);
+  color: var(--accent-text);
   font-weight: 700;
 }
 
@@ -455,7 +496,7 @@ body {
 }
 
 .btn-secondary {
-  background: white;
+  background: var(--card-bg);
   border-color: var(--border);
   color: var(--text);
 }
@@ -509,7 +550,7 @@ body {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  border: 2px solid white;
+  border: 2px solid var(--card-bg);
   outline: 1px solid var(--border);
   cursor: pointer;
   display: flex;
@@ -540,7 +581,7 @@ body {
 .view-toggle-btn {
   padding: 0.45rem 1rem;
   border: none;
-  background: white;
+  background: var(--card-bg);
   color: var(--text);
   font-size: 0.85rem;
   font-weight: 600;
@@ -564,7 +605,7 @@ body {
   padding: 0.6rem 0.8rem;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: white;
+  background: var(--card-bg);
   color: var(--text);
   font-size: 0.9rem;
   font-weight: 600;
@@ -582,7 +623,7 @@ body {
 
 .settings-nav-btn-count {
   background: var(--accent-soft);
-  color: var(--accent-dark);
+  color: var(--accent-text);
   border-radius: 999px;
   padding: 0.05rem 0.5rem;
   font-size: 0.78rem;
@@ -600,7 +641,7 @@ body {
 .deleted-panel-header h2 {
   margin: 0;
   font-size: 1.1rem;
-  color: var(--accent-dark);
+  color: var(--accent-text);
 }
 
 .back-btn {
@@ -631,7 +672,7 @@ body {
 }
 
 .deleted-tab--active {
-  color: var(--accent-dark);
+  color: var(--accent-text);
   border-bottom-color: var(--accent);
 }
 
@@ -683,7 +724,7 @@ body {
 /* Calendar view (react-big-calendar) */
 
 .event-calendar {
-  background: white;
+  background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 1rem;
@@ -768,7 +809,7 @@ body {
 }
 
 .announcement-panel {
-  background: white;
+  background: var(--card-bg);
   border-radius: 12px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
   padding: 1.5rem;
@@ -778,7 +819,7 @@ body {
 .announcement-panel h2 {
   margin: 0 0 0.75rem;
   font-size: 1.15rem;
-  color: var(--accent-dark);
+  color: var(--accent-text);
 }
 
 .announcement-text {
@@ -808,4 +849,39 @@ body {
 
 .announcement-panel .btn {
   width: 100%;
+}
+
+/* Dark-mode overrides for the two imported libraries' own default CSS
+   (react-day-picker, react-big-calendar), which otherwise hardcode a white/
+   light-gray background and dark text regardless of our variables. */
+
+[data-color-mode="dark"] .rdp-root {
+  color: var(--text);
+}
+
+[data-color-mode="dark"] .rdp-month_caption,
+[data-color-mode="dark"] .rdp-weekday {
+  color: var(--text);
+}
+
+[data-color-mode="dark"] .rdp-day_button:disabled {
+  color: var(--text-muted);
+}
+
+[data-color-mode="dark"] .event-calendar {
+  color: var(--text);
+}
+
+[data-color-mode="dark"] .rbc-off-range-bg {
+  background: color-mix(in srgb, var(--card-bg) 80%, black);
+}
+
+[data-color-mode="dark"] .rbc-month-view,
+[data-color-mode="dark"] .rbc-header,
+[data-color-mode="dark"] .rbc-month-row,
+[data-color-mode="dark"] .rbc-day-bg,
+[data-color-mode="dark"] .rbc-toolbar button {
+  background: var(--card-bg);
+  border-color: var(--border);
+  color: var(--text);
 }

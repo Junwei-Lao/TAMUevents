@@ -7,10 +7,11 @@ import AnnouncementPanel from "./components/AnnouncementPanel.jsx";
 import Footer from "./components/Footer.jsx";
 import { searchEvents } from "./api.js";
 import { DEFAULT_FILTERS } from "./filterOptions.js";
-import { dedupeEventsByUrl, excludeBlacklistedEvents } from "./eventFilters.js";
+import { dedupeEvents, excludeBlacklistedEvents, getEventIdentityKey } from "./eventFilters.js";
 import { EVENT_NAME_BLACKLIST } from "./eventNameBlacklist.js";
 import { useLocalStorageState } from "./hooks/useLocalStorageState.js";
 import { applyTheme, DEFAULT_THEME_KEY } from "./themes.js";
+import { applyColorMode, DEFAULT_COLOR_MODE } from "./colorMode.js";
 import { parseIsoDateLocal } from "./dateUtils.js";
 import { getLatestAnnouncement } from "./announcements.js";
 
@@ -65,8 +66,11 @@ export default function App() {
   // Settings persist across a refresh (unlike rawEvents/pendingRange/
   // pendingFilters above, which intentionally reset - see README).
   const [themeKey, setThemeKey] = useLocalStorageState("themeKey", DEFAULT_THEME_KEY);
+  const [colorMode, setColorMode] = useLocalStorageState("colorMode", DEFAULT_COLOR_MODE);
   const [viewMode, setViewMode] = useLocalStorageState("viewMode", "list");
-  const [deletedEventUrls, setDeletedEventUrls] = useLocalStorageState("deletedEventUrls", []);
+  // {key, title, date}[] - key is getEventIdentityKey(event) (title + start
+  // + end date; see eventFilters.js for why not event_id/url).
+  const [deletedEvents, setDeletedEvents] = useLocalStorageState("deletedEvents", []);
   const [deletedEventNames, setDeletedEventNames] = useLocalStorageState("deletedEventNames", []);
 
   // The newest file in src/announcement/, and whether the user has
@@ -91,19 +95,20 @@ export default function App() {
   };
 
   useEffect(() => applyTheme(themeKey), [themeKey]);
+  useEffect(() => applyColorMode(colorMode), [colorMode]);
 
   // Deletions/restores apply live against whatever was last fetched, so
   // toggling them in Settings updates the main page immediately without
   // needing to re-run the search.
   const visibleEvents = useMemo(() => {
-    const deletedUrls = new Set(deletedEventUrls.map((entry) => entry.url));
+    const deletedKeys = new Set(deletedEvents.map((entry) => entry.key));
     const deletedNames = new Set(deletedEventNames.map((name) => name.toLowerCase()));
     return rawEvents.filter(
       (event) =>
-        !deletedUrls.has(event.url) &&
+        !deletedKeys.has(getEventIdentityKey(event)) &&
         !deletedNames.has((event.title || "").toLowerCase())
     );
-  }, [rawEvents, deletedEventUrls, deletedEventNames]);
+  }, [rawEvents, deletedEvents, deletedEventNames]);
 
   const openDrawer = () => setIsDrawerOpen(true);
   const closeDrawer = () => setIsDrawerOpen(false);
@@ -126,7 +131,7 @@ export default function App() {
       const results = await searchEvents(
         buildRequestBody(pendingRange, pendingFilters)
       );
-      const deduped = dedupeEventsByUrl(results);
+      const deduped = dedupeEvents(results);
       const finalResults = excludeBlacklistedEvents(deduped, EVENT_NAME_BLACKLIST);
       setRawEvents(finalResults);
 
@@ -144,11 +149,10 @@ export default function App() {
     }
   };
 
-  const deleteEventByUrl = (event) => {
-    setDeletedEventUrls((prev) =>
-      prev.some((entry) => entry.url === event.url)
-        ? prev
-        : [...prev, { url: event.url, title: event.title, date: event.date }]
+  const deleteEvent = (event) => {
+    const key = getEventIdentityKey(event);
+    setDeletedEvents((prev) =>
+      prev.some((entry) => entry.key === key) ? prev : [...prev, { key, title: event.title, date: event.date }]
     );
   };
 
@@ -156,8 +160,8 @@ export default function App() {
     setDeletedEventNames((prev) => (prev.includes(event.title) ? prev : [...prev, event.title]));
   };
 
-  const restoreEventByUrl = (url) => {
-    setDeletedEventUrls((prev) => prev.filter((entry) => entry.url !== url));
+  const restoreEvent = (key) => {
+    setDeletedEvents((prev) => prev.filter((entry) => entry.key !== key));
   };
 
   const restoreEventByName = (name) => {
@@ -186,11 +190,13 @@ export default function App() {
         onClose={closeSettings}
         themeKey={themeKey}
         onThemeChange={setThemeKey}
+        colorMode={colorMode}
+        onColorModeChange={setColorMode}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
-        deletedEventUrls={deletedEventUrls}
+        deletedEvents={deletedEvents}
         deletedEventNames={deletedEventNames}
-        onRestoreByUrl={restoreEventByUrl}
+        onRestoreEvent={restoreEvent}
         onRestoreByName={restoreEventByName}
       />
       <main className={`main-content ${viewMode === "calendar" ? "main-content--calendar" : ""}`}>
@@ -199,7 +205,7 @@ export default function App() {
           isLoading={isLoading}
           error={error}
           viewMode={viewMode}
-          onDeleteByUrl={deleteEventByUrl}
+          onDeleteEvent={deleteEvent}
           onDeleteByName={deleteEventsByName}
           calendarFocusDate={calendarFocusDate}
           onCalendarFocusDateChange={setCalendarFocusDate}

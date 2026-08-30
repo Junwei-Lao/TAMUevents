@@ -2,6 +2,11 @@
 
 React + Vite frontend for browsing TAMU calendar events, filtered by date range.
 
+Browser tab icon: `public/favicon.svg`, a single-color (maroon `#500000`)
+calendar glyph - intentionally hardcoded rather than tied to the selectable
+theme color below, so the tab icon stays a stable brand mark regardless of
+which accent a visitor picks.
+
 ## Run it
 
 ```bash
@@ -105,14 +110,15 @@ Each item is the JSON form of the `Event` dataclass in
   card opens `event.url` in a new tab.
 - Before display, results go through two frontend-only cleanup passes
   (`src/eventFilters.js`, applied in `App.jsx`'s `applyFilter`):
-  - **Dedupe by url** - the backend can return multiple rows for what's
-    really the same event: not just repeated `event_id`s (see
-    `postgre_io.py`'s docstring on why its real identity key is
-    `(event_id, date, date_time)`, not `event_id` alone), but also distinct
-    `event_id`s that point at the same `event.url` (the same event
-    scraped/listed more than once under different ids). `event_id` isn't a
-    reliable identity either way, so this dedupes on `url` instead, keeping
-    the first occurrence.
+  - **Dedupe by (title, start_date, end_date)** - the backend can return
+    multiple rows for what's really the same event: not just repeated
+    `event_id`s (see `postgre_io.py`'s docstring on why its real identity
+    key is `(event_id, date, date_time)`, not `event_id` alone), but also
+    entirely distinct `event_id`s/urls for what's clearly the same listing
+    scraped more than once. Neither `event_id` nor `url` turned out to be
+    reliable identity, so `getEventIdentityKey` in `eventFilters.js` keys on
+    the event's title plus its `start_date`/`end_date` instead - same name,
+    same day(s), same event - keeping the first occurrence.
   - **Name blacklist** - events whose title exactly matches (case-insensitive)
     an entry in `src/eventNameBlacklist.js`'s `EVENT_NAME_BLACKLIST` are
     dropped. This is a frontend-only exclusion (no backend change) - edit
@@ -124,9 +130,15 @@ Opens a right-side drawer. Unlike search results, everything here persists
 across a refresh via `localStorage` (`src/hooks/useLocalStorageState.js`).
 
 - **Theme Color** - 6 selectable accent colors (`src/themes.js`), applied by
-  setting the `--accent` / `--accent-dark` / `--accent-soft` CSS custom
-  properties on `<html>` (see `applyTheme`). Add more by adding entries to
-  `THEMES`.
+  setting `data-theme` on `<html>` (see `applyTheme`); `index.css` derives
+  `--accent-dark` / `--accent-soft` / `--accent-text` from each theme's
+  `--accent` with `color-mix()`. Add more by adding entries to `THEMES` plus
+  a matching `[data-theme="..."]` block in `index.css`.
+- **Appearance** - Light/Dark toggle, right under Theme Color. Applied by
+  setting `data-color-mode="dark"` on `<html>` (`src/colorMode.js`), which
+  `index.css` uses to redefine the neutral palette (`--bg`, `--card-bg`,
+  `--border`, `--text`, `--text-muted`) and the accent derivatives above for
+  dark backgrounds.
 - **View** - switches the main page between the day-by-day **List** and a
   month **Calendar** (`react-big-calendar`, `src/components/EventCalendar.jsx`).
   The calendar auto-jumps to the month of the earliest result whenever a new
@@ -144,10 +156,10 @@ across a refresh via `localStorage` (`src/hooks/useLocalStorageState.js`).
 Hovering an event (list card or calendar event bar) reveals two icons at
 its right edge:
 
-- Plain trash - removes just this event (records `{url, title, date}` in
-  the `deletedEventUrls` list, keyed by `event.url` for the same reason the
-  dedupe pass above is - `event_id` isn't reliable). A different event at a
-  different url isn't affected, even if it shares this one's title.
+- Plain trash - removes just this event (records `{key, title, date}` in
+  the `deletedEvents` list, `key` being the same `(title, start_date,
+  end_date)` identity the dedupe pass above uses). A different event with a
+  different title or on different dates isn't affected.
 - Trash with an "ALL" badge - removes every event with this exact title
   (records the title in the `deletedEventNames` list). This is a
   user-editable list, separate from the developer-maintained

@@ -1,6 +1,6 @@
 import EventActions from "./EventActions.jsx";
 
-export default function EventCard({ event, onDeleteByUrl, onDeleteByName }) {
+export default function EventCard({ event, onDeleteEvent, onDeleteByName }) {
   const openEvent = () => {
     window.open(event.url, "_blank", "noopener,noreferrer");
   };
@@ -20,7 +20,7 @@ export default function EventCard({ event, onDeleteByUrl, onDeleteByName }) {
       onClick={openEvent}
       onKeyDown={handleKeyDown}
     >
-      <EventActions event={event} onDeleteByUrl={onDeleteByUrl} onDeleteByName={onDeleteByName} />
+      <EventActions event={event} onDeleteEvent={onDeleteEvent} onDeleteByName={onDeleteByName} />
       <h3 className="event-card-title">{event.title}</h3>
       <p className="event-card-date">
         {event.date}

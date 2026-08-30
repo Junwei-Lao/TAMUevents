@@ -3,7 +3,7 @@ import TrashIcon from "./TrashIcon.jsx";
 // The two hover-reveal trash buttons shared by the list card and the
 // calendar event cell. `compact` shrinks them to fit a calendar month
 // cell's single-line event bar.
-export default function EventActions({ event, onDeleteByUrl, onDeleteByName, compact = false }) {
+export default function EventActions({ event, onDeleteEvent, onDeleteByName, compact = false }) {
   const stop = (fn) => (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -17,7 +17,7 @@ export default function EventActions({ event, onDeleteByUrl, onDeleteByName, com
         className="icon-btn icon-btn--danger"
         title="Remove this event"
         aria-label={`Remove "${event.title}"`}
-        onClick={stop(onDeleteByUrl)}
+        onClick={stop(onDeleteEvent)}
       >
         <TrashIcon />
       </button>
